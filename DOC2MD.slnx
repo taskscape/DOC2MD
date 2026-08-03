@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DOC2MD.Api/DOC2MD.Api.csproj" />
+    <Project Path="src/DOC2MD.Cli/DOC2MD.Cli.csproj" />
+    <Project Path="src/DOC2MD.Gui/DOC2MD.Gui.csproj" />
+    <Project Path="src/DOC2MD.Mcp/DOC2MD.Mcp.csproj" />
+  </Folder>
+</Solution>

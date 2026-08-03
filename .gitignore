@@ -1,0 +1,9 @@
+﻿.vs
+src/DOC2MD.Api/bin
+src/DOC2MD.Api/obj
+src/DOC2MD.Cli/bin
+src/DOC2MD.Cli/obj
+src/DOC2MD.Gui/bin
+src/DOC2MD.Gui/obj
+src/DOC2MD.Mcp/bin
+src/DOC2MD.Mcp/obj
