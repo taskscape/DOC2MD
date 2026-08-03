@@ -1,6 +1,6 @@
 # DOC2MD
 
-DOC2MD is a Windows-friendly wrapper around the vendored Microsoft MarkItDown source in `lib`.
+DOC2MD is a high fidelity converter of different office documents to markdown format. It provides CLI, API, MCP interfaces wrapping around the vendored Microsoft MarkItDown source in `lib`, Microsoft Document Intelligence and open source OCR/PDF conversion libraries.
 
 ## Projects
 
