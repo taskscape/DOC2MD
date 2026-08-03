@@ -4,6 +4,11 @@ using Azure;
 using Azure.AI.DocumentIntelligence;
 using Azure.Core;
 using Azure.Identity;
+using Docnet.Core;
+using Docnet.Core.Models;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp.PixelFormats;
 using PDFtoImage;
 using Tesseract;
 using UglyToad.PdfPig;
@@ -613,7 +618,17 @@ internal static class DocumentConversion
             };
 
 #pragma warning disable CA1416
-            Conversion.SavePng(tempImage, input, new Index(pageNumber - 1), null, renderOptions);
+            try
+            {
+                Conversion.SavePng(tempImage, input, new Index(pageNumber - 1), null, renderOptions);
+            }
+            catch (FormatException)
+            {
+                // Some browser-readable PDFs are not accepted by PDFtoImage's
+                // renderer. Render just the affected page with Docnet instead,
+                // then continue through the same Tesseract OCR path.
+                RenderPageWithDocnet(tempImage, input, pageNumber - 1);
+            }
 #pragma warning restore CA1416
 
             using var pix = Pix.LoadFromFile(tempImage);
@@ -634,6 +649,22 @@ internal static class DocumentConversion
                 // Temporary image cleanup failure should not hide a successful conversion.
             }
         }
+    }
+
+    private static void RenderPageWithDocnet(
+        string outputPath,
+        string inputPath,
+        int zeroBasedPageIndex)
+    {
+        using var document = DocLib.Instance.GetDocReader(
+            inputPath,
+            new PageDimensions(1700, 2200));
+        using var page = document.GetPageReader(zeroBasedPageIndex);
+        var width = page.GetPageWidth();
+        var height = page.GetPageHeight();
+        var bgra = page.GetImage();
+        using var image = Image.LoadPixelData<Bgra32>(bgra, width, height);
+        image.Save(outputPath, new PngEncoder());
     }
 
     private static string ResolveTessdataPath(PdfConversionOptions options)

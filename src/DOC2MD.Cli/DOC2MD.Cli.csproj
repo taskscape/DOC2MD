@@ -12,6 +12,8 @@
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
     <PackageReference Include="PdfPig" Version="0.1.15" />
     <PackageReference Include="PDFtoImage" Version="5.2.1" />
+    <PackageReference Include="Docnet.Core" Version="2.6.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
   </ItemGroup>
