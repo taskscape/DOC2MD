@@ -9,6 +9,22 @@ DOC2MD is a high fidelity converter of different office documents to markdown fo
 - `DOC2MD.Api` is an ASP.NET Core REST API suitable for IIS hosting and calls the CLI.
 - `DOC2MD.Mcp` is a stdio MCP server exposing the same conversion operations as tools.
 
+## Windows installer
+
+Build the complete Windows x64 installer from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1 -Version 1.0.0
+```
+
+The script publishes all four .NET projects as framework-dependent executables, creates a portable Python runtime with `markitdown[all]`, downloads English and Polish Tesseract trained-data models, copies a complete LibreOffice runtime, and compiles `artifacts\installer\DOC2MD-<version>-win-x64-Setup.exe` with Inno Setup. Pass `-LibreOfficePath` when LibreOffice is not installed in its standard `Program Files` location, and `-IsccPath` when `ISCC.exe` is not discoverable automatically.
+
+The installer contains the Python runtime and libraries, both OCR models, LibreOffice, and the native/managed libraries produced by `dotnet publish`. It does not contain or install .NET. Install the .NET 8 Desktop Runtime (which also supplies the base .NET runtime) and the ASP.NET Core 8 Runtime if the API executable will be used.
+
+Installed entry points are `DOC2MD.Gui.exe`, `DOC2MD.Cli.exe`, `DOC2MD.Api.exe`, and `DOC2MD.Mcp.exe`. The installer adds a Start menu shortcut for the GUI and can optionally add the install directory to the current user's `PATH`.
+
+Every push to `main` or `master` runs `.github\workflows\publish-installer.yml`. The workflow assigns version `1.0.<run-number>`, builds and verifies the complete installer, creates a SHA-256 checksum, and publishes both files in a non-draft GitHub Release tagged `v1.0.<run-number>`. Re-running the same workflow run updates the existing release assets without assigning a different version.
+
 ## MarkItDown on Windows without Docker
 
 MarkItDown does not require Docker for local Windows use. The upstream README says it requires Python 3.10 or newer and can be installed with `pip install 'markitdown[all]'` or from source with `pip install -e 'packages/markitdown[all]'`. This wrapper uses that path instead of Docker.
@@ -62,7 +78,7 @@ Legacy Office, macro-enabled Office, RTF, and OpenDocument files are modernized 
 | `.xls`, `.xlsm`, `.ods` | `.xlsx` |
 | `.ppt`, `.pptm`, `.odp` | `.pptx` |
 
-DOC2MD uses LibreOffice headless as the default modernization prerequisite. It looks for `soffice.exe` on `PATH`, in the usual `Program Files\LibreOffice\program` locations, or at `DOC2MD_SOFFICE_PATH`. `DOC2MD_SOFFICE_PATH` can point either to `soffice.exe` or to the LibreOffice installation root.
+DOC2MD uses LibreOffice headless as the default modernization prerequisite. It looks for the runtime bundled by the Windows installer, `soffice.exe` on `PATH`, the usual `Program Files\LibreOffice\program` locations, or `DOC2MD_SOFFICE_PATH`. `DOC2MD_SOFFICE_PATH` can point either to `soffice.exe` or to the LibreOffice installation root.
 
 If LibreOffice is present, DOC2MD first saves the old-format document beside the source in the modern format and then converts the modernized copy to Markdown. If the modernized file already exists beside the source, DOC2MD reuses it instead of overwriting it.
 

@@ -7,3 +7,7 @@ src/DOC2MD.Gui/bin
 src/DOC2MD.Gui/obj
 src/DOC2MD.Mcp/bin
 src/DOC2MD.Mcp/obj
+artifacts/cache/
+artifacts/installer/
+artifacts/installer-build/
+artifacts/installer-code-check/

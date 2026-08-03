@@ -417,11 +417,14 @@ internal static class Cli
 
         var candidates = new[]
         {
+            Path.Combine(FindRepoRoot(), "runtime", "libreoffice", "program", "soffice.exe"),
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
         }
         .Where(path => !string.IsNullOrWhiteSpace(path))
-        .Select(path => Path.Combine(path, "LibreOffice", "program", "soffice.exe"));
+        .Select(path => path.EndsWith("soffice.exe", StringComparison.OrdinalIgnoreCase)
+            ? path
+            : Path.Combine(path, "LibreOffice", "program", "soffice.exe"));
 
         foreach (var candidate in candidates)
         {

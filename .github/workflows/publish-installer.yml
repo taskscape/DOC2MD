@@ -1,0 +1,185 @@
+name: Build and publish DOC2MD installer
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish versioned Windows installer
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the release revision
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install the .NET 8 SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.423
+
+      - name: Resolve the incremented release version
+        id: version
+        shell: pwsh
+        run: |
+          $runNumber = [long] '${{ github.run_number }}'
+          if ($runNumber -lt 1 -or $runNumber -gt 65534)
+          {
+              throw "Workflow run number '$runNumber' cannot be represented as a .NET version component."
+          }
+
+          $version = "1.0.$runNumber"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Release version: $version"
+
+      - name: Install installer build dependencies
+        shell: pwsh
+        run: |
+          choco install innosetup libreoffice-fresh --yes --no-progress
+          if ($LASTEXITCODE -notin @(0, 1641, 3010))
+          {
+              throw "Chocolatey dependency installation failed with exit code $LASTEXITCODE."
+          }
+
+          $iscc = @(
+              'C:\Program Files\Inno Setup 7\ISCC.exe',
+              'C:\Program Files\Inno Setup 6\ISCC.exe',
+              'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+              'C:\Program Files (x86)\Inno Setup\ISCC.exe'
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+
+          if ([string]::IsNullOrWhiteSpace($iscc))
+          {
+              throw 'Chocolatey completed without installing an Inno Setup compiler in a supported location.'
+          }
+
+          $soffice = @(
+              'C:\Program Files\LibreOffice\program\soffice.exe',
+              'C:\Program Files (x86)\LibreOffice\program\soffice.exe'
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+
+          if ([string]::IsNullOrWhiteSpace($soffice))
+          {
+              throw 'Chocolatey completed without installing LibreOffice in a supported location.'
+          }
+
+          Write-Host "Inno Setup: $iscc"
+          Write-Host "LibreOffice: $soffice"
+
+      - name: Build and verify the dependency-complete installer
+        shell: pwsh
+        run: |
+          ./installer/Build-Installer.ps1 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Create the checksum manifest
+        id: artifact
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $installer = [System.IO.Path]::GetFullPath("./artifacts/installer/DOC2MD-$version-win-x64-Setup.exe")
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf))
+          {
+              throw "The verified installer was not produced at '$installer'."
+          }
+
+          $checksum = "$installer.sha256"
+          $digest = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  $([System.IO.Path]::GetFileName($installer))" |
+              Set-Content -LiteralPath $checksum -Encoding ascii
+
+          "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "checksum=$checksum" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Create or update the GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          INSTALLER_PATH: ${{ steps.artifact.outputs.installer }}
+          CHECKSUM_PATH: ${{ steps.artifact.outputs.checksum }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $releaseJson = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft 2>$null
+          $releaseExitCode = $LASTEXITCODE
+
+          if ($releaseExitCode -eq 0)
+          {
+              $tagCommit = (& gh api "repos/$env:GITHUB_REPOSITORY/commits/$env:RELEASE_TAG" --jq .sha).Trim()
+              if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $env:GITHUB_SHA)
+              {
+                  throw "Release tag $env:RELEASE_TAG does not point to workflow commit $env:GITHUB_SHA."
+              }
+
+              $release = $releaseJson | ConvertFrom-Json
+              Write-Host "Updating existing release $env:RELEASE_TAG (draft: $($release.isDraft))."
+          }
+          else
+          {
+              & gh release create $env:RELEASE_TAG `
+                  --repo $env:GITHUB_REPOSITORY `
+                  --target $env:GITHUB_SHA `
+                  --draft `
+                  --generate-notes `
+                  --title "DOC2MD $env:RELEASE_VERSION"
+              if ($LASTEXITCODE -ne 0)
+              {
+                  throw "Could not create draft release $env:RELEASE_TAG."
+              }
+          }
+
+          & gh release upload $env:RELEASE_TAG $env:INSTALLER_PATH $env:CHECKSUM_PATH `
+              --repo $env:GITHUB_REPOSITORY `
+              --clobber
+          if ($LASTEXITCODE -ne 0)
+          {
+              throw "Could not upload release assets for $env:RELEASE_TAG."
+          }
+
+          & gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
+          if ($LASTEXITCODE -ne 0)
+          {
+              throw "Could not publish release $env:RELEASE_TAG."
+          }
+
+      - name: Verify the published release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0)
+          {
+              throw "Published release $env:RELEASE_TAG could not be read back."
+          }
+
+          if ($release.isDraft)
+          {
+              throw "Release $env:RELEASE_TAG is still a draft."
+          }
+
+          $expectedAssets = @(
+              "DOC2MD-$env:RELEASE_VERSION-win-x64-Setup.exe",
+              "DOC2MD-$env:RELEASE_VERSION-win-x64-Setup.exe.sha256"
+          )
+          $publishedAssets = @($release.assets | ForEach-Object { $_.name })
+          foreach ($expectedAsset in $expectedAssets)
+          {
+              if ($expectedAsset -notin $publishedAssets)
+              {
+                  throw "Release $env:RELEASE_TAG is missing '$expectedAsset'."
+              }
+          }
+
+          Write-Host "Verified release $env:RELEASE_TAG with both expected assets."
