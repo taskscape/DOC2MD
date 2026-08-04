@@ -5,7 +5,7 @@ DOC2MD is a high fidelity converter of different office documents to markdown fo
 ## Projects
 
 - `DOC2MD.Cli` converts one document or a folder of supported documents.
-- `DOC2MD.Gui` is a Windows Forms front end that calls the CLI.
+- `DOC2MD.Gui` is a WPF desktop front end that calls the CLI.
 - `DOC2MD.Api` is an ASP.NET Core REST API suitable for IIS hosting and calls the CLI.
 - `DOC2MD.Mcp` is a stdio MCP server exposing the same conversion operations as tools.
 
