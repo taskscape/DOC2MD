@@ -17,8 +17,14 @@ internal sealed class Doc2MdSettings
 
     public string? AzureDocumentIntelligenceKey { get; set; }
 
+    /// <summary>
+    /// Resolves a supported setting by applying the process environment override before the persisted value.
+    /// </summary>
+    /// <param name="environmentVariableName">The supported DOC2MD environment-variable name.</param>
+    /// <returns>The effective value, or <see langword="null"/> when the setting is unknown or unset.</returns>
     public string? Get(string environmentVariableName)
     {
+        // Environment variables are intentionally authoritative so automation can override a user's saved defaults.
         var environmentValue = Environment.GetEnvironmentVariable(environmentVariableName);
         if (!string.IsNullOrWhiteSpace(environmentValue))
         {
@@ -52,6 +58,10 @@ internal static class Doc2MdConfiguration
             "DOC2MD",
             "settings.json");
 
+    /// <summary>
+    /// Loads the current user's persisted DOC2MD settings and decrypts the Azure key for in-process use.
+    /// </summary>
+    /// <returns>A settings instance; missing files are treated as an empty configuration.</returns>
     public static Doc2MdSettings Load()
     {
         if (!File.Exists(SettingsPath))
@@ -61,10 +71,19 @@ internal static class Doc2MdConfiguration
 
         var settings = JsonSerializer.Deserialize<Doc2MdSettings>(File.ReadAllText(SettingsPath), JsonOptions)
             ?? new Doc2MdSettings();
+        // Only the protected representation is persisted; plaintext exists solely on the returned in-memory object.
         settings.AzureDocumentIntelligenceKey = Unprotect(settings.ProtectedAzureDocumentIntelligenceKey);
         return settings;
     }
 
+    /// <summary>
+    /// Persists Azure Document Intelligence settings with the API key protected for the current Windows user.
+    /// </summary>
+    /// <param name="endpoint">The Azure Document Intelligence endpoint.</param>
+    /// <param name="key">The API key to protect with Windows DPAPI.</param>
+    /// <param name="locale">The optional document locale.</param>
+    /// <param name="tier">The Azure service tier identifier.</param>
+    /// <param name="useAzureByDefault">Whether future conversions should select Azure processing by default.</param>
     public static void SaveAzure(
         string endpoint,
         string key,
@@ -77,6 +96,7 @@ internal static class Doc2MdConfiguration
         settings.AzureDocumentIntelligenceEndpoint = endpoint;
         settings.AzureDocumentIntelligenceLocale = string.IsNullOrWhiteSpace(locale) ? null : locale;
         settings.AzureDocumentIntelligenceTier = tier;
+        // Clear the transient plaintext property before serialization to prevent accidental credential disclosure.
         settings.ProtectedAzureDocumentIntelligenceKey = Protect(key);
         settings.AzureDocumentIntelligenceKey = null;
 
@@ -84,6 +104,12 @@ internal static class Doc2MdConfiguration
         File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, JsonOptions), Encoding.UTF8);
     }
 
+    /// <summary>
+    /// Protects a secret with the Windows current-user DPAPI scope.
+    /// </summary>
+    /// <param name="value">The plaintext value.</param>
+    /// <returns>The Base64-encoded protected value.</returns>
+    /// <exception cref="PlatformNotSupportedException">Thrown when invoked outside Windows.</exception>
     private static string Protect(string value)
     {
         if (!OperatingSystem.IsWindows())
@@ -91,6 +117,7 @@ internal static class Doc2MdConfiguration
             throw new PlatformNotSupportedException("DOC2MD secure local key storage uses Windows DPAPI.");
         }
 
+        // CurrentUser scope deliberately makes copied settings unusable by other accounts on the same machine.
         var protectedBytes = ProtectedData.Protect(
             Encoding.UTF8.GetBytes(value),
             Entropy,
@@ -98,8 +125,14 @@ internal static class Doc2MdConfiguration
         return Convert.ToBase64String(protectedBytes);
     }
 
+    /// <summary>
+    /// Decrypts a Base64-encoded DPAPI value for the current Windows user.
+    /// </summary>
+    /// <param name="protectedValue">The protected value, if one was saved.</param>
+    /// <returns>The plaintext value, or <see langword="null"/> when no usable protected value is available.</returns>
     private static string? Unprotect(string? protectedValue)
     {
+        // Non-Windows callers may inspect non-secret settings, but Windows-bound DPAPI data cannot be recovered there.
         if (string.IsNullOrWhiteSpace(protectedValue) || !OperatingSystem.IsWindows())
         {
             return null;

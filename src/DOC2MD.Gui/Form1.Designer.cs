@@ -13,6 +13,7 @@ partial class Form1
     /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
     protected override void Dispose(bool disposing)
     {
+        // The component container owns designer-created managed resources; the base class handles native window state.
         if (disposing && (components != null))
         {
             components.Dispose();
@@ -28,6 +29,7 @@ partial class Form1
     /// </summary>
     private void InitializeComponent()
     {
+        // Runtime layout is composed in BuildUi; the designer retains only the base form contract and component lifetime.
         components = new System.ComponentModel.Container();
         AutoScaleMode = AutoScaleMode.Font;
         ClientSize = new Size(800, 450);

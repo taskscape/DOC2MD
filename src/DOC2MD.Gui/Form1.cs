@@ -75,14 +75,22 @@ public partial class Form1 : Form
     private CancellationTokenSource? _operationCts;
     private Process? _currentProcess;
 
+    /// <summary>
+    /// Initializes the DOC2MD desktop form and its programmatically composed controls.
+    /// </summary>
     public Form1()
     {
+        // The designer owns only the base form; BuildUi composes the responsive operational interface.
         InitializeComponent();
         BuildUi();
     }
 
+    /// <summary>
+    /// Configures the main window, composes its layout, and wires user interactions.
+    /// </summary>
     private void BuildUi()
     {
+        // Fixed command/status heights protect labels and controls from clipping while the log absorbs resizing.
         Text = "DOC2MD";
         Font = new Font("Segoe UI", 11F);
         MinimumSize = new Size(1080, 820);
@@ -118,8 +126,13 @@ public partial class Form1 : Form
         TogglePdfOptions();
     }
 
+    /// <summary>
+    /// Builds the document, PDF-processing, and conversion command controls.
+    /// </summary>
+    /// <returns>The composed command panel.</returns>
     private Control BuildCommandPanel()
     {
+        // The explicit row geometry mirrors the minimum form size established in BuildUi.
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -191,8 +204,13 @@ public partial class Form1 : Form
         return panel;
     }
 
+    /// <summary>
+    /// Builds the status label, progress bar, and cancellation controls.
+    /// </summary>
+    /// <returns>The composed status panel.</returns>
     private Control BuildStatusPanel()
     {
+        // Status and cancel use fixed widths so progress receives all additional horizontal space.
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -209,6 +227,11 @@ public partial class Form1 : Form
         return panel;
     }
 
+    /// <summary>
+    /// Creates a consistently aligned command-panel label.
+    /// </summary>
+    /// <param name="text">The label text.</param>
+    /// <returns>The configured label.</returns>
     private static Label CreateRowLabel(string text) => new()
     {
         Text = text,
@@ -218,8 +241,12 @@ public partial class Form1 : Form
         Margin = new Padding(0, 0, 10, 0)
     };
 
+    /// <summary>
+    /// Applies the single-document or folder-mode control state.
+    /// </summary>
     private void ToggleMode()
     {
+        // Mode-dependent controls remain disabled while a child process is active to keep arguments immutable.
         var busy = _operationCts is not null;
         _recursive.Enabled = _folder.Checked && !busy;
         _output.Enabled = _singleFile.Checked && !busy;
@@ -231,8 +258,12 @@ public partial class Form1 : Form
         }
     }
 
+    /// <summary>
+    /// Enables only the controls relevant to the selected PDF processing stack.
+    /// </summary>
     private void TogglePdfOptions()
     {
+        // Local and Azure options are mutually exclusive because the CLI rejects mixed-stack arguments.
         var busy = _operationCts is not null;
         var mode = SelectedPdfProcessing();
         var local = mode == "local" && !busy;
@@ -246,8 +277,12 @@ public partial class Form1 : Form
         _azureKey.Enabled = azure;
     }
 
+    /// <summary>
+    /// Opens the mode-appropriate input picker and derives a single-file output path.
+    /// </summary>
     private void BrowseInput()
     {
+        // Folder mode deliberately leaves output implicit because Markdown files are written beside each source.
         if (_folder.Checked)
         {
             using var dialog = new FolderBrowserDialog();
@@ -270,8 +305,12 @@ public partial class Form1 : Form
         }
     }
 
+    /// <summary>
+    /// Prompts for the Markdown output path used by single-document conversion.
+    /// </summary>
     private void BrowseOutput()
     {
+        // The output picker is unused in folder mode and ToggleMode keeps it disabled there.
         using var save = new SaveFileDialog { Filter = "Markdown|*.md|All files|*.*", DefaultExt = "md" };
         if (save.ShowDialog(this) == DialogResult.OK)
         {
@@ -279,8 +318,12 @@ public partial class Form1 : Form
         }
     }
 
+    /// <summary>
+    /// Prompts for a Tesseract trained-data directory.
+    /// </summary>
     private void BrowseTessdata()
     {
+        // Language model presence is validated by the CLI so the picker remains a generic folder selector.
         using var dialog = new FolderBrowserDialog();
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
@@ -288,8 +331,12 @@ public partial class Form1 : Form
         }
     }
 
+    /// <summary>
+    /// Owns one GUI conversion operation, including busy state, cancellation, and user-visible error handling.
+    /// </summary>
     private async Task ConvertAsync()
     {
+        // A single operation is allowed because the form tracks only one child process and one progress sequence.
         if (_operationCts is not null)
         {
             return;
@@ -319,6 +366,7 @@ public partial class Form1 : Form
         }
         catch (Exception ex)
         {
+            // The GUI is a user boundary, so command/setup errors are logged rather than allowed to terminate WinForms.
             AppendLog("ERROR: " + ex.Message);
             _status.Text = "Failed";
         }
@@ -330,8 +378,13 @@ public partial class Form1 : Form
         }
     }
 
+    /// <summary>
+    /// Builds and executes the CLI command for the selected single document.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the child CLI process.</param>
     private async Task ConvertSingleFileAsync(CancellationToken cancellationToken)
     {
+        // Validation occurs before command construction so quoted empty values never reach the CLI parser.
         if (string.IsNullOrWhiteSpace(_input.Text))
         {
             throw new InvalidOperationException("Input file is required.");
@@ -355,6 +408,10 @@ public partial class Form1 : Form
         _status.Text = result.exitCode == 0 ? "Completed" : "Failed";
     }
 
+    /// <summary>
+    /// Converts selected folder inputs sequentially while updating deterministic progress.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the active or next child CLI process.</param>
     private async Task ConvertFolderAsync(CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(_input.Text))
@@ -367,6 +424,7 @@ public partial class Form1 : Form
             throw new DirectoryNotFoundException($"Input folder was not found: {_input.Text}");
         }
 
+        // The GUI enumerates files itself to provide per-file progress and cancellation between CLI invocations.
         var files = SelectFolderConversionInputs(Directory.EnumerateFiles(_input.Text, "*.*", _recursive.Checked ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
             .Where(file => SupportedExtensions.Contains(Path.GetExtension(file)))
             .Where(file => !Path.GetExtension(file).Equals(".md", StringComparison.OrdinalIgnoreCase))
@@ -417,8 +475,15 @@ public partial class Form1 : Form
         _status.Text = failures == 0 ? $"Completed {files.Length} files" : $"Completed with {failures} failure(s)";
     }
 
+    /// <summary>
+    /// Executes one CLI command and appends its complete observable result to the GUI log.
+    /// </summary>
+    /// <param name="arguments">The prepared CLI arguments.</param>
+    /// <param name="cancellationToken">Cancels the child process.</param>
+    /// <returns>The CLI exit code and captured output streams.</returns>
     private async Task<(int exitCode, string stdout, string stderr)> ExecuteCliCommandAsync(string arguments, CancellationToken cancellationToken)
     {
+        // Log a redacted command before launch so failures during process startup still leave actionable context.
         var cliPath = ResolveCliPath();
         AppendLog("> " + cliPath + " " + RedactSecretArguments(arguments));
         var result = await RunCliAsync(cliPath, arguments, cancellationToken);
@@ -439,6 +504,11 @@ public partial class Form1 : Form
         return result;
     }
 
+    /// <summary>
+    /// Selects one source per Markdown output, preferring legacy originals over modernized siblings.
+    /// </summary>
+    /// <param name="files">The candidate source files.</param>
+    /// <returns>A deterministic source list.</returns>
     private static string[] SelectFolderConversionInputs(IEnumerable<string> files) =>
         files.GroupBy(file => Path.ChangeExtension(file, ".md"), StringComparer.OrdinalIgnoreCase)
             .Select(group => group
@@ -448,6 +518,13 @@ public partial class Form1 : Form
             .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
+    /// <summary>
+    /// Starts the DOC2MD CLI without a shell and captures both UTF-8 output streams.
+    /// </summary>
+    /// <param name="cliPath">The CLI executable path or command name.</param>
+    /// <param name="arguments">The prepared command-line arguments.</param>
+    /// <param name="cancellationToken">Cancels the child process.</param>
+    /// <returns>The CLI exit code and captured output streams.</returns>
     private async Task<(int exitCode, string stdout, string stderr)> RunCliAsync(string cliPath, string arguments, CancellationToken cancellationToken)
     {
         using var process = new Process();
@@ -465,12 +542,14 @@ public partial class Form1 : Form
 
         if (SelectedPdfProcessing() == "azure" && !string.IsNullOrWhiteSpace(_azureKey.Text))
         {
+            // Secrets travel through the child environment so they never appear in arguments, logs, or process listings.
             process.StartInfo.Environment["DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY"] = _azureKey.Text;
         }
 
         process.Start();
         _currentProcess = process;
 
+        // Drain both pipes concurrently; waiting first could deadlock if either redirected buffer fills.
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
 
@@ -505,8 +584,12 @@ public partial class Form1 : Form
         return (process.ExitCode, stdout, stderr);
     }
 
+    /// <summary>
+    /// Signals cooperative cancellation and terminates the active CLI process tree.
+    /// </summary>
     private void CancelOperation()
     {
+        // Cancellation is idempotent because a button click can race with natural process completion.
         if (_operationCts is null || _operationCts.IsCancellationRequested)
         {
             return;
@@ -518,6 +601,9 @@ public partial class Form1 : Form
         KillCurrentProcess();
     }
 
+    /// <summary>
+    /// Best-effort terminates the GUI-owned CLI process and any converter subprocesses it started.
+    /// </summary>
     private void KillCurrentProcess()
     {
         try
@@ -529,11 +615,17 @@ public partial class Form1 : Form
         }
         catch (InvalidOperationException)
         {
+            // Process exit can race with HasExited/Kill; completion has already achieved the desired state.
         }
     }
 
+    /// <summary>
+    /// Applies the global enabled state for controls during a conversion.
+    /// </summary>
+    /// <param name="busy">Whether a conversion is active.</param>
     private void SetBusy(bool busy)
     {
+        // Reapply mode-specific rules after the global state so controls do not become valid in the wrong mode.
         _singleFile.Enabled = !busy;
         _folder.Enabled = !busy;
         _input.Enabled = !busy;
@@ -545,27 +637,47 @@ public partial class Form1 : Form
         TogglePdfOptions();
     }
 
+    /// <summary>
+    /// Resets the progress bar for a new operation.
+    /// </summary>
+    /// <param name="maximum">The expected number of progress units.</param>
     private void ResetProgress(int maximum)
     {
+        // WinForms requires Maximum to exceed Minimum even when there are no discovered files.
         _progress.Minimum = 0;
         _progress.Maximum = Math.Max(1, maximum);
         _progress.Value = 0;
     }
 
+    /// <summary>
+    /// Sets progress after clamping it to the current WinForms range.
+    /// </summary>
+    /// <param name="value">The requested progress value.</param>
     private void SetProgressValue(int value)
     {
+        // Clamping tolerates late progress updates when a cancellation changes the effective work count.
         _progress.Value = Math.Min(Math.Max(value, _progress.Minimum), _progress.Maximum);
     }
 
+    /// <summary>
+    /// Appends text to the operational log and keeps the newest entry visible.
+    /// </summary>
+    /// <param name="text">The text to append.</param>
     private void AppendLog(string text)
     {
+        // All calls originate on the UI synchronization context, so no cross-thread marshaling is required.
         _log.AppendText(text + Environment.NewLine);
         _log.SelectionStart = _log.TextLength;
         _log.ScrollToCaret();
     }
 
+    /// <summary>
+    /// Resolves the CLI from explicit configuration, a development checkout, or the installed application directory.
+    /// </summary>
+    /// <returns>The CLI executable path or fallback command name.</returns>
     private static string ResolveCliPath()
     {
+        // Environment configuration is authoritative for IIS-style or custom deployments with separated components.
         var configured = Environment.GetEnvironmentVariable("DOC2MD_CLI_PATH");
         if (!string.IsNullOrWhiteSpace(configured))
         {
@@ -587,8 +699,12 @@ public partial class Form1 : Form
         return "DOC2MD.Cli.exe";
     }
 
+    /// <summary>
+    /// Initializes PDF controls from environment and non-secret persisted settings.
+    /// </summary>
     private void ConfigurePdfDefaults()
     {
+        // Environment values override user settings to match the CLI's configuration precedence.
         _pdfProcessing.Items.AddRange(new object[] { "local", "azure", "markitdown" });
         var configured = LoadStoredSettings();
         var configuredMode = Environment.GetEnvironmentVariable("DOC2MD_PDF_PROCESSING")
@@ -604,11 +720,17 @@ public partial class Form1 : Form
         _azureEndpoint.Text = Environment.GetEnvironmentVariable("DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
             ?? configured.AzureDocumentIntelligenceEndpoint
             ?? "";
+        // The protected key is resolved by the CLI and is never decrypted into a GUI control.
         _azureKey.Text = "";
     }
 
+    /// <summary>
+    /// Loads the non-secret subset of persisted settings required to initialize the form.
+    /// </summary>
+    /// <returns>Stored display defaults, or an empty object for missing or malformed settings.</returns>
     private static StoredDoc2MdSettings LoadStoredSettings()
     {
+        // Malformed settings should not prevent the desktop UI from opening; the CLI remains the validation authority.
         var path = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "DOC2MD",
@@ -630,8 +752,13 @@ public partial class Form1 : Form
         }
     }
 
+    /// <summary>
+    /// Builds only the CLI options applicable to the selected PDF processing stack.
+    /// </summary>
+    /// <returns>The quoted PDF argument fragment.</returns>
     private string BuildPdfArguments()
     {
+        // Avoid forwarding disabled controls because the CLI intentionally rejects mixed-stack configuration.
         var mode = SelectedPdfProcessing();
         var args = $" --pdf-processing {Quote(mode)}";
 
@@ -648,14 +775,30 @@ public partial class Form1 : Form
         return args;
     }
 
+    /// <summary>
+    /// Gets the selected processing mode with the local mode as a safe initialization fallback.
+    /// </summary>
+    /// <returns>The CLI processing-mode value.</returns>
     private string SelectedPdfProcessing() =>
         _pdfProcessing.SelectedItem?.ToString() ?? "local";
 
+    /// <summary>
+    /// Formats an optional quoted CLI name/value argument.
+    /// </summary>
+    /// <param name="name">The option name.</param>
+    /// <param name="value">The optional value.</param>
+    /// <returns>An empty string when unset; otherwise the formatted argument.</returns>
     private static string OptionalArgument(string name, string? value) =>
         string.IsNullOrWhiteSpace(value) ? "" : $" {name} {Quote(value)}";
 
+    /// <summary>
+    /// Replaces recognized Azure key argument values before commands are logged.
+    /// </summary>
+    /// <param name="arguments">The complete CLI argument string.</param>
+    /// <returns>The argument string with secret values replaced.</returns>
     private static string RedactSecretArguments(string arguments)
     {
+        // Handle quoted and unquoted values because callers outside this form may reuse the logging helper contract.
         var names = new[] { "--azure-document-intelligence-key", "--azure-key" };
         foreach (var name in names)
         {
@@ -704,6 +847,11 @@ public partial class Form1 : Form
         return arguments;
     }
 
+    /// <summary>
+    /// Quotes a command-line value and escapes embedded quotation marks.
+    /// </summary>
+    /// <param name="value">The value to quote.</param>
+    /// <returns>The quoted value.</returns>
     private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
 
     private sealed class StoredDoc2MdSettings

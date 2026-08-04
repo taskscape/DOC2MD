@@ -56,6 +56,11 @@ Convert a folder, writing `.md` files beside source documents:
 dotnet run --project .\src\DOC2MD.Cli -- convert-folder --input C:\Docs --recursive --overwrite --continue-on-error
 ```
 
+Both commands write each result through an ASCII-only temporary file in the
+destination folder and move it to the requested `.md` path only after that
+document succeeds. A failed item removes only its own temporary output;
+successful outputs from the same folder conversion remain available.
+
 Folder conversion is intentionally limited to typical document files. DOC2MD currently scans only these extensions:
 
 | Category | Extensions |

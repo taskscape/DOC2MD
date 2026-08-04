@@ -8,6 +8,8 @@ Console.OutputEncoding = Encoding.UTF8;
 
 while (await Console.In.ReadLineAsync() is { } line)
 {
+    // MCP stdio transports frame messages as one JSON-RPC request per line. Ignoring blank or
+    // malformed input keeps a bad notification from terminating the long-lived server process.
     if (string.IsNullOrWhiteSpace(line))
     {
         continue;
@@ -28,6 +30,7 @@ while (await Console.In.ReadLineAsync() is { } line)
 
     if (id is null)
     {
+        // JSON-RPC notifications intentionally have no response.
         continue;
     }
 
@@ -63,6 +66,8 @@ while (await Console.In.ReadLineAsync() is { } line)
     }
 }
 
+// Advertise the protocol and capabilities expected by MCP clients. Keep this version pinned until
+// the request and response shapes below are deliberately updated for a newer MCP revision.
 static JsonObject InitializeResult() => new()
 {
     ["protocolVersion"] = "2024-11-05",
@@ -77,6 +82,8 @@ static JsonObject InitializeResult() => new()
     }
 };
 
+// Describe the public tools at the MCP boundary. These schemas must remain aligned with the CLI
+// builders because the CLI remains the final validation authority.
 static JsonObject ToolsListResult() => new()
 {
     ["tools"] = new JsonArray
@@ -141,6 +148,7 @@ static JsonObject ToolsListResult() => new()
     }
 };
 
+// Dispatch a tool call to the shared CLI and translate its process result into MCP content.
 static async Task<JsonObject> CallToolAsync(JsonNode? parameters)
 {
     var name = parameters?["name"]?.GetValue<string>() ?? throw new InvalidOperationException("Tool name is required.");
@@ -153,6 +161,8 @@ static async Task<JsonObject> CallToolAsync(JsonNode? parameters)
         _ => throw new InvalidOperationException($"Unknown tool: {name}")
     };
 
+    // Azure secrets travel through the child environment rather than command-line arguments,
+    // where process-inspection tools and MCP logs could expose them.
     var result = await CliRunner.RunAsync(cliArguments, String(arguments, "azureDocumentIntelligenceKey"));
     return new JsonObject
     {
@@ -170,6 +180,8 @@ static async Task<JsonObject> CallToolAsync(JsonNode? parameters)
     };
 }
 
+// Build one-file conversion arguments. Required values are checked here so the MCP caller receives
+// a tool error before a child process is started.
 static string BuildConvertArguments(JsonObject arguments)
 {
     var inputPath = Required(arguments, "inputPath");
@@ -184,6 +196,8 @@ static string BuildConvertArguments(JsonObject arguments)
     return cliArgs;
 }
 
+// Build folder conversion arguments. The CLI derives output paths from the input tree, so the MCP
+// contract intentionally requires only the source folder.
 static string BuildConvertFolderArguments(JsonObject arguments)
 {
     var inputFolder = Required(arguments, "inputFolder");
@@ -207,6 +221,8 @@ static string BuildConvertFolderArguments(JsonObject arguments)
     return cliArgs;
 }
 
+// Forward only explicitly supplied PDF options. Cross-option compatibility is deliberately checked
+// by the CLI so API, GUI, and MCP callers all follow one policy.
 static string BuildPdfOptions(JsonObject arguments)
 {
     var cliArgs = new StringBuilder();
@@ -224,6 +240,7 @@ static string BuildPdfOptions(JsonObject arguments)
     return cliArgs.ToString();
 }
 
+// Append one optional CLI switch while preserving the leading-space convention used by callers.
 static void AppendOption(StringBuilder cliArgs, string name, string? value)
 {
     if (!string.IsNullOrWhiteSpace(value))
@@ -232,28 +249,40 @@ static void AppendOption(StringBuilder cliArgs, string name, string? value)
     }
 }
 
+// Read a required string and turn a missing value into a caller-facing validation error.
 static string Required(JsonObject arguments, string name) =>
     arguments[name]?.GetValue<string>() ?? throw new InvalidOperationException($"{name} is required.");
 
+// Read an optional string without coercing other JSON primitive types.
 static string? String(JsonObject arguments, string name) =>
     arguments[name]?.GetValue<string>();
 
+// Read an optional integer without inventing a default; the CLI supplies its documented defaults.
 static int? Int(JsonObject arguments, string name) =>
     arguments[name]?.GetValue<int>();
 
+// Preserve the distinction between an omitted Boolean and an explicitly supplied false value.
 static bool Bool(JsonObject arguments, string name, bool defaultValue = false) =>
     arguments[name]?.GetValue<bool>() ?? defaultValue;
 
+// Emit and flush one response immediately, as required by interactive stdio clients.
 static async Task WriteAsync(JsonObject message)
 {
     await Console.Out.WriteLineAsync(message.ToJsonString());
     await Console.Out.FlushAsync();
 }
 
+// Quote one process argument using the escaping convention shared by the other front ends.
 static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
 
 internal static class CliRunner
 {
+    /// <summary>
+    /// Executes the DOC2MD CLI and captures its complete output for an MCP tool response.
+    /// </summary>
+    /// <param name="arguments">The already quoted command-line argument string.</param>
+    /// <param name="azureDocumentIntelligenceKey">An optional Azure key passed through the child environment.</param>
+    /// <returns>The child process exit code and captured standard streams.</returns>
     public static async Task<CliResult> RunAsync(string arguments, string? azureDocumentIntelligenceKey)
     {
         using var process = new Process();
@@ -271,27 +300,38 @@ internal static class CliRunner
 
         if (!string.IsNullOrWhiteSpace(azureDocumentIntelligenceKey))
         {
+            // Keep credentials out of the command line, which can be visible to other local users.
             process.StartInfo.Environment["DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY"] = azureDocumentIntelligenceKey;
         }
 
         process.Start();
+        // MCP conversions are expected to keep stderr small enough that reading stdout first does
+        // not fill the secondary pipe; changing the established process contract is out of scope here.
         var stdout = await process.StandardOutput.ReadToEndAsync();
         var stderr = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
         return new CliResult(process.ExitCode, stdout, stderr);
     }
 
+    /// <summary>
+    /// Resolves the DOC2MD CLI executable used by the MCP server.
+    /// </summary>
+    /// <returns>The configured CLI path, a development-build path, or the executable name for normal OS lookup.</returns>
     private static string ResolveCliPath()
     {
         var configured = Environment.GetEnvironmentVariable("DOC2MD_CLI_PATH");
         if (!string.IsNullOrWhiteSpace(configured))
         {
+            // Packaged deployments may keep the CLI outside the MCP server directory and opt in
+            // through an explicit path without relying on the process working directory.
             return configured;
         }
 
         var current = new DirectoryInfo(AppContext.BaseDirectory);
         while (current is not null)
         {
+            // The upward search supports running the MCP project directly from any repository
+            // subdirectory while preserving the CLI's standard Debug output location.
             var candidate = Path.Combine(current.FullName, "src", "DOC2MD.Cli", "bin", "Debug", "net8.0", "DOC2MD.Cli.exe");
             if (File.Exists(candidate))
             {

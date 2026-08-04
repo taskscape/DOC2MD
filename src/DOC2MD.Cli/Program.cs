@@ -51,6 +51,11 @@ internal static class Cli
         [".odp"] = ".pptx"
     };
 
+    /// <summary>
+    /// Dispatches the requested CLI command and translates unhandled command errors into a stable process exit code.
+    /// </summary>
+    /// <param name="args">The command-line arguments supplied to DOC2MD.</param>
+    /// <returns>The process exit code.</returns>
     public static async Task<int> RunAsync(string[] args)
     {
         if (args.Length == 0 || Has(args, "--help") || Has(args, "-h"))
@@ -73,10 +78,17 @@ internal static class Cli
         }
         catch (Exception ex)
         {
+            // The CLI is the process boundary, so command exceptions become user-facing errors rather than crash reports.
             return Fail(ex.Message, json);
         }
     }
 
+    /// <summary>
+    /// Converts one supported source document to the requested Markdown file.
+    /// </summary>
+    /// <param name="args">Arguments containing the input, output, overwrite, and PDF options.</param>
+    /// <param name="json">Whether to format the result as indented JSON.</param>
+    /// <returns>The converter exit code, or zero when a missing optional legacy dependency causes a documented skip.</returns>
     private static async Task<int> ConvertFileAsync(string[] args, bool json)
     {
         var input = Required(args, "--input");
@@ -100,10 +112,10 @@ internal static class Cli
             throw new IOException($"Output file already exists: {output}. Use --overwrite to replace it.");
         }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         var prepared = await PrepareInputForConversionAsync(input);
         if (prepared.Skipped)
         {
+            // Missing LibreOffice is a non-fatal capability gap so callers can continue processing other file types.
             WriteResult(json, new
             {
                 succeeded = false,
@@ -117,7 +129,11 @@ internal static class Cli
             return 0;
         }
 
-        var result = await DocumentConversion.ConvertAsync(prepared.InputPath, output, conversionOptions, RunMarkItDownAsync);
+        var result = await ConvertAtomicallyAsync(
+            prepared.InputPath,
+            output,
+            overwrite,
+            conversionOptions);
         WriteResult(json, new
         {
             succeeded = result.ExitCode == 0,
@@ -134,6 +150,12 @@ internal static class Cli
         return result.ExitCode == 0 ? 0 : result.ExitCode;
     }
 
+    /// <summary>
+    /// Converts supported documents in a folder while preserving per-file outcomes for batch callers.
+    /// </summary>
+    /// <param name="args">Arguments containing folder traversal, overwrite, error-continuation, and PDF options.</param>
+    /// <param name="json">Whether to format the aggregate result as indented JSON.</param>
+    /// <returns>Zero when all attempted conversions succeed; otherwise one.</returns>
     private static async Task<int> ConvertFolderAsync(string[] args, bool json)
     {
         var inputFolder = Required(args, "--input");
@@ -147,6 +169,7 @@ internal static class Cli
             throw new DirectoryNotFoundException($"Input folder was not found: {inputFolder}");
         }
 
+        // Selection is centralized so a legacy source and its modern sibling never generate competing Markdown outputs.
         var files = SelectFolderConversionInputs(Directory.EnumerateFiles(inputFolder, "*.*", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
             .Where(f => SupportedExtensions.Contains(Path.GetExtension(f)))
             .Where(f => !Path.GetExtension(f).Equals(".md", StringComparison.OrdinalIgnoreCase))
@@ -182,7 +205,11 @@ internal static class Cli
                     continue;
                 }
 
-                result = await DocumentConversion.ConvertAsync(prepared.InputPath, output, conversionOptions, RunMarkItDownAsync);
+                result = await ConvertAtomicallyAsync(
+                    prepared.InputPath,
+                    output,
+                    overwrite,
+                    conversionOptions);
             }
             catch (Exception ex)
             {
@@ -241,6 +268,12 @@ internal static class Cli
         return failures == 0 ? 0 : 1;
     }
 
+    /// <summary>
+    /// Creates the repository-local Python environment and installs the vendored MarkItDown package with all extras.
+    /// </summary>
+    /// <param name="args">Arguments optionally selecting the Python executable.</param>
+    /// <param name="json">Whether to format the installation result as indented JSON.</param>
+    /// <returns>The failing subprocess exit code, or zero after a successful installation.</returns>
     private static async Task<int> InstallMarkItDownAsync(string[] args, bool json)
     {
         var python = Value(args, "--python") ?? "python";
@@ -251,6 +284,7 @@ internal static class Cli
             throw new DirectoryNotFoundException($"MarkItDown source package was not found: {packagePath}");
         }
 
+        // Keeping the environment under the repository makes CLI resolution deterministic and avoids global Python changes.
         var venv = Path.Combine(root, ".markitdown-venv");
         var create = await RunProcessAsync(python, $"-m venv {Quote(venv)}", root);
         if (create.ExitCode != 0)
@@ -273,8 +307,15 @@ internal static class Cli
         return install.ExitCode;
     }
 
+    /// <summary>
+    /// Validates and securely persists Azure Document Intelligence defaults for the current user.
+    /// </summary>
+    /// <param name="args">Arguments containing endpoint, credential, locale, tier, and default-mode choices.</param>
+    /// <param name="json">Whether to format the configuration result as indented JSON.</param>
+    /// <returns>Zero after the settings are stored.</returns>
     private static int ConfigureAzure(string[] args, bool json)
     {
+        // Command-line aliases take precedence, then environment variables, then the existing per-user settings.
         var configured = Doc2MdConfiguration.Load();
         var endpoint = Value(args, "--azure-document-intelligence-endpoint")
             ?? Value(args, "--azure-endpoint")
@@ -329,6 +370,11 @@ internal static class Cli
         return 0;
     }
 
+    /// <summary>
+    /// Selects one source per eventual Markdown path, preferring an original legacy document over its modern sibling.
+    /// </summary>
+    /// <param name="files">The candidate source files.</param>
+    /// <returns>A deterministic, case-insensitively ordered source list.</returns>
     private static string[] SelectFolderConversionInputs(IEnumerable<string> files) =>
         files.GroupBy(file => Path.ChangeExtension(file, ".md"), StringComparer.OrdinalIgnoreCase)
             .Select(group => group
@@ -338,6 +384,34 @@ internal static class Cli
             .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
+    /// <summary>
+    /// Converts one prepared document without exposing a partial final output.
+    /// </summary>
+    /// <param name="input">The prepared input path.</param>
+    /// <param name="output">The requested final Markdown path.</param>
+    /// <param name="overwrite">Whether an existing final output may be replaced.</param>
+    /// <param name="conversionOptions">The selected PDF conversion behavior.</param>
+    /// <returns>The underlying document conversion result.</returns>
+    private static Task<DocumentConversionResult> ConvertAtomicallyAsync(
+        string input,
+        string output,
+        bool overwrite,
+        PdfConversionOptions conversionOptions) =>
+        AtomicFileOutput.WriteAsync(
+            output,
+            overwrite,
+            temporaryOutput => DocumentConversion.ConvertAsync(
+                input,
+                temporaryOutput,
+                conversionOptions,
+                RunMarkItDownAsync),
+            result => result.ExitCode == 0);
+
+    /// <summary>
+    /// Resolves a directly convertible input or prepares a modern Office-format copy with LibreOffice.
+    /// </summary>
+    /// <param name="input">The source document path.</param>
+    /// <returns>A ready input descriptor or a non-fatal skipped descriptor.</returns>
     private static async Task<PreparedInput> PrepareInputForConversionAsync(string input)
     {
         var extension = Path.GetExtension(input);
@@ -349,6 +423,7 @@ internal static class Cli
         var modernizedPath = Path.ChangeExtension(input, targetExtension);
         if (File.Exists(modernizedPath))
         {
+            // Existing siblings are user-owned artifacts and are reused rather than overwritten by automatic modernization.
             return PreparedInput.Ready(
                 modernizedPath,
                 modernizedPath,
@@ -367,6 +442,13 @@ internal static class Cli
             $"Modernized {extension} to {targetExtension} with LibreOffice before Markdown conversion.");
     }
 
+    /// <summary>
+    /// Runs LibreOffice headlessly to create a modern Office document beside a legacy source.
+    /// </summary>
+    /// <param name="input">The legacy source path.</param>
+    /// <param name="modernizedPath">The path LibreOffice is expected to produce.</param>
+    /// <param name="targetExtension">The modern target extension.</param>
+    /// <returns>A success result, or a skipped result when LibreOffice cannot be started.</returns>
     private static async Task<ModernizationResult> ModernizeWithLibreOfficeAsync(string input, string modernizedPath, string targetExtension)
     {
         var soffice = ResolveSofficePath();
@@ -379,6 +461,7 @@ internal static class Cli
 
         if (result.ExitCode == -1)
         {
+            // RunProcessAsync reserves -1 for process-discovery failures, which are optional for non-legacy inputs.
             return ModernizationResult.Skipped(
                 $"LibreOffice is not available, so '{input}' was not modernized to {targetExtension} and was skipped. " +
                 "Install LibreOffice or set DOC2MD_SOFFICE_PATH to soffice.exe to enable legacy document conversion.");
@@ -395,8 +478,13 @@ internal static class Cli
         return ModernizationResult.Success();
     }
 
+    /// <summary>
+    /// Resolves LibreOffice from explicit configuration, the installer payload, or conventional Windows locations.
+    /// </summary>
+    /// <returns>An executable path when discovered, or the PATH command name for a final launch attempt.</returns>
     private static string ResolveSofficePath()
     {
+        // Explicit configuration is authoritative even when it is not currently resolvable, preserving caller intent and diagnostics.
         var configured = Environment.GetEnvironmentVariable("DOC2MD_SOFFICE_PATH")
             ?? Environment.GetEnvironmentVariable("DOC2MD_LIBREOFFICE_PATH");
         if (!string.IsNullOrWhiteSpace(configured))
@@ -437,8 +525,15 @@ internal static class Cli
         return "soffice";
     }
 
+    /// <summary>
+    /// Runs MarkItDown using the first available command from DOC2MD's documented resolution order.
+    /// </summary>
+    /// <param name="input">The source document path.</param>
+    /// <param name="output">The Markdown output path.</param>
+    /// <returns>The child-process exit code and captured output streams.</returns>
     private static async Task<(int ExitCode, string stdout, string stderr)> RunMarkItDownAsync(string input, string output)
     {
+        // Resolution favors explicit and repository-local runtimes so installed builds do not depend on global Python state.
         var root = FindRepoRoot();
         var configured = Environment.GetEnvironmentVariable("DOC2MD_MARKITDOWN_COMMAND");
         if (!string.IsNullOrWhiteSpace(configured))
@@ -462,8 +557,17 @@ internal static class Cli
         return await RunPythonMarkItDownAsync("python", input, output, root);
     }
 
+    /// <summary>
+    /// Executes the MarkItDown module with the vendored source directory exposed through <c>PYTHONPATH</c>.
+    /// </summary>
+    /// <param name="python">The Python executable or command name.</param>
+    /// <param name="input">The source document path.</param>
+    /// <param name="output">The Markdown output path.</param>
+    /// <param name="root">The DOC2MD repository or installation root.</param>
+    /// <returns>The child-process exit code and captured output streams.</returns>
     private static async Task<(int ExitCode, string stdout, string stderr)> RunPythonMarkItDownAsync(string python, string input, string output, string root)
     {
+        // The installer retains vendored source at the same relative path used by development checkouts.
         var source = Environment.GetEnvironmentVariable("DOC2MD_MARKITDOWN_SOURCE")
             ?? Path.Combine(root, "lib", "packages", "markitdown", "src");
 
@@ -475,6 +579,12 @@ internal static class Cli
         return FilterBenignMarkItDownWarnings(input, result);
     }
 
+    /// <summary>
+    /// Removes the known pydub FFmpeg warning when converting document types that cannot require audio decoding.
+    /// </summary>
+    /// <param name="input">The source path used to distinguish audio from document inputs.</param>
+    /// <param name="result">The original MarkItDown process result.</param>
+    /// <returns>The result with only the irrelevant warning lines removed.</returns>
     private static (int ExitCode, string stdout, string stderr) FilterBenignMarkItDownWarnings(
         string input,
         (int ExitCode, string stdout, string stderr) result)
@@ -486,6 +596,7 @@ internal static class Cli
             return result;
         }
 
+        // Preserve the warning for audio inputs because FFmpeg is then a real runtime dependency rather than optional noise.
         var filtered = new StringBuilder();
         using var reader = new StringReader(result.stderr);
         while (reader.ReadLine() is { } line)
@@ -501,10 +612,23 @@ internal static class Cli
         return (result.ExitCode, result.stdout, filtered.ToString());
     }
 
+    /// <summary>
+    /// Identifies either line emitted by pydub's two-line missing-FFmpeg warning.
+    /// </summary>
+    /// <param name="line">A standard-error line.</param>
+    /// <returns><see langword="true"/> when the line belongs to the known warning.</returns>
     private static bool IsBenignPydubFfmpegWarningLine(string line) =>
         line.Contains("RuntimeWarning: Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work", StringComparison.Ordinal)
         || line.Contains("warn(\"Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work\", RuntimeWarning)", StringComparison.Ordinal);
 
+    /// <summary>
+    /// Runs a child process without a shell and captures its UTF-8 output streams.
+    /// </summary>
+    /// <param name="fileName">The executable path or command name.</param>
+    /// <param name="arguments">The already-quoted command-line arguments.</param>
+    /// <param name="workingDirectory">The child process working directory.</param>
+    /// <param name="environment">Optional environment overrides.</param>
+    /// <returns>The process result; exit code -1 indicates that Windows could not start the executable.</returns>
     private static async Task<(int ExitCode, string stdout, string stderr)> RunProcessAsync(
         string fileName,
         string arguments,
@@ -536,6 +660,7 @@ internal static class Cli
             }
 
             process.Start();
+            // Read both redirected streams before waiting so a full pipe cannot deadlock the child process.
             var stdout = await process.StandardOutput.ReadToEndAsync();
             var stderr = await process.StandardError.ReadToEndAsync();
             await process.WaitForExitAsync();
@@ -547,8 +672,13 @@ internal static class Cli
         }
     }
 
+    /// <summary>
+    /// Finds the nearest ancestor containing the vendored MarkItDown source layout.
+    /// </summary>
+    /// <returns>The DOC2MD root, or the current directory when the layout cannot be discovered.</returns>
     private static string FindRepoRoot()
     {
+        // AppContext.BaseDirectory works for both build outputs and the flat installed payload.
         var current = new DirectoryInfo(AppContext.BaseDirectory);
         while (current is not null)
         {
@@ -563,11 +693,25 @@ internal static class Cli
         return Directory.GetCurrentDirectory();
     }
 
+    /// <summary>
+    /// Reads a required option value.
+    /// </summary>
+    /// <param name="args">The command-line arguments.</param>
+    /// <param name="name">The option name.</param>
+    /// <returns>The option value.</returns>
+    /// <exception cref="ArgumentException">Thrown when the option is absent.</exception>
     private static string Required(string[] args, string name) =>
         Value(args, name) ?? throw new ArgumentException($"Missing required option {name}.");
 
+    /// <summary>
+    /// Reads the value immediately following a named command-line option.
+    /// </summary>
+    /// <param name="args">The command-line arguments.</param>
+    /// <param name="name">The option name.</param>
+    /// <returns>The option value, or <see langword="null"/> when absent.</returns>
     private static string? Value(string[] args, string name)
     {
+        // Options use a deliberately small name/value parser; combined or equals syntax is not part of the CLI contract.
         for (var i = 0; i < args.Length - 1; i++)
         {
             if (args[i].Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -579,22 +723,50 @@ internal static class Cli
         return null;
     }
 
+    /// <summary>
+    /// Determines whether a case-insensitive flag is present.
+    /// </summary>
+    /// <param name="args">The command-line arguments.</param>
+    /// <param name="name">The flag name.</param>
+    /// <returns><see langword="true"/> when the flag is present.</returns>
     private static bool Has(string[] args, string name) =>
         args.Any(a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Writes a failed command result and returns the conventional nonzero exit code.
+    /// </summary>
+    /// <param name="message">The user-facing error message.</param>
+    /// <param name="json">Whether to indent the JSON output.</param>
+    /// <returns>Exit code one.</returns>
     private static int Fail(string message, bool json)
     {
+        // All CLI output remains JSON-shaped so GUI, API, and MCP wrappers can consume the same error contract.
         WriteResult(json, new { succeeded = false, error = message });
         return 1;
     }
 
+    /// <summary>
+    /// Serializes a command result to standard output.
+    /// </summary>
+    /// <param name="json">Whether to use human-readable indentation.</param>
+    /// <param name="result">The result payload.</param>
     private static void WriteResult(bool json, object result)
     {
+        // Even non-indented mode emits JSON because machine-readable output is the wrapper integration contract.
         Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = json }));
     }
 
+    /// <summary>
+    /// Quotes a command-line value and escapes embedded quotation marks.
+    /// </summary>
+    /// <param name="value">The value to quote.</param>
+    /// <returns>The quoted value.</returns>
     private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
 
+    /// <summary>
+    /// Formats the supported extension set deterministically for diagnostics.
+    /// </summary>
+    /// <returns>A comma-separated extension list.</returns>
     private static string SupportedExtensionsLabel() =>
         string.Join(", ", SupportedExtensions.OrderBy(extension => extension, StringComparer.OrdinalIgnoreCase));
 
@@ -605,22 +777,48 @@ internal static class Cli
         bool Skipped,
         string? Warning)
     {
+        /// <summary>
+        /// Creates a descriptor for an input that is ready to convert.
+        /// </summary>
+        /// <param name="inputPath">The effective conversion input.</param>
+        /// <param name="ModernizedPath">The generated or reused modern sibling, if any.</param>
+        /// <param name="Modernization">A user-facing modernization description.</param>
+        /// <returns>The ready descriptor.</returns>
         public static PreparedInput Ready(string inputPath, string? ModernizedPath, string? Modernization) =>
             new(inputPath, ModernizedPath, Modernization, Skipped: false, Warning: null);
 
+        /// <summary>
+        /// Creates a non-fatal descriptor for an input skipped because an optional capability is unavailable.
+        /// </summary>
+        /// <param name="inputPath">The original input path.</param>
+        /// <param name="warning">The reason for skipping the input.</param>
+        /// <returns>The skipped descriptor.</returns>
         public static PreparedInput SkippedWithWarning(string inputPath, string warning) =>
             new(inputPath, ModernizedPath: null, Modernization: null, Skipped: true, Warning: warning);
     }
 
     private sealed record ModernizationResult(bool Succeeded, string? Warning)
     {
+        /// <summary>
+        /// Creates a successful modernization result.
+        /// </summary>
+        /// <returns>The successful result.</returns>
         public static ModernizationResult Success() => new(Succeeded: true, Warning: null);
 
+        /// <summary>
+        /// Creates a skipped modernization result with a user-facing warning.
+        /// </summary>
+        /// <param name="warning">The reason modernization could not run.</param>
+        /// <returns>The skipped result.</returns>
         public static ModernizationResult Skipped(string warning) => new(Succeeded: false, warning);
     }
 
+    /// <summary>
+    /// Writes command usage, supported formats, and configuration precedence to standard output.
+    /// </summary>
     private static void PrintHelp()
     {
+        // Keep this text synchronized with the parser and README because it is the offline operational reference.
         Console.WriteLine("""
 DOC2MD.Cli
 

@@ -50,8 +50,14 @@ internal sealed record PdfConversionOptions(
 {
     public long MaxPartSizeBytes => MaxPartSizeMb * 1_000_000L;
 
+    /// <summary>
+    /// Builds validated PDF conversion options from command-line, environment, and persisted settings.
+    /// </summary>
+    /// <param name="args">The command-line arguments.</param>
+    /// <returns>The effective conversion options.</returns>
     public static PdfConversionOptions FromArgs(string[] args)
     {
+        // Explicit CLI values win over environment or persisted settings so each invocation remains independently controllable.
         var configured = Doc2MdConfiguration.Load();
         var mode = ParseProcessingMode(
             Value(args, "--pdf-processing")
@@ -133,8 +139,14 @@ internal sealed record PdfConversionOptions(
             maxPartSizeMb);
     }
 
+    /// <summary>
+    /// Rejects options belonging to a PDF processing stack other than the selected mode.
+    /// </summary>
+    /// <param name="args">The command-line arguments.</param>
+    /// <param name="mode">The selected processing mode.</param>
     private static void ValidateSingleProcessingStack(string[] args, PdfProcessingMode mode)
     {
+        // Mixing stacks is rejected rather than ignored because silently unused credentials or OCR tuning is misleading.
         var hasLocalOptions = Has(args, "--ocr-languages")
             || Has(args, "--tessdata")
             || Has(args, "--pdf-text-threshold")
@@ -160,6 +172,11 @@ internal sealed record PdfConversionOptions(
         }
     }
 
+    /// <summary>
+    /// Parses a PDF processing mode and its supported compatibility aliases.
+    /// </summary>
+    /// <param name="value">The configured mode text.</param>
+    /// <returns>The normalized mode.</returns>
     private static PdfProcessingMode ParseProcessingMode(string value) =>
         value.Trim().ToLowerInvariant() switch
         {
@@ -172,6 +189,11 @@ internal sealed record PdfConversionOptions(
             _ => throw new ArgumentException("--pdf-processing must be one of: local, azure, markitdown.")
         };
 
+    /// <summary>
+    /// Parses the Azure service tier used to enforce request limits.
+    /// </summary>
+    /// <param name="value">The configured tier text.</param>
+    /// <returns>The normalized Azure tier.</returns>
     private static AzureDocumentIntelligenceTier ParseAzureTier(string value) =>
         value.Trim().ToLowerInvariant() switch
         {
@@ -184,6 +206,11 @@ internal sealed record PdfConversionOptions(
             _ => throw new ArgumentException("--azure-document-intelligence-tier must be one of: f0, s0.")
         };
 
+    /// <summary>
+    /// Parses the policy controlling PDF splitting.
+    /// </summary>
+    /// <param name="value">The configured splitting policy.</param>
+    /// <returns>The normalized splitting mode.</returns>
     private static PdfSplittingMode ParseSplittingMode(string value) =>
         value.Trim().ToLowerInvariant() switch
         {
@@ -193,16 +220,35 @@ internal sealed record PdfConversionOptions(
             _ => throw new ArgumentException("--pdf-splitting must be one of: auto, always, never.")
         };
 
+    /// <summary>
+    /// Selects a conservative default page limit for the active processing stack and Azure tier.
+    /// </summary>
+    /// <param name="mode">The processing mode.</param>
+    /// <param name="azureTier">The Azure tier when Azure processing is selected.</param>
+    /// <returns>The default maximum page count per part.</returns>
     private static int DefaultMaxPagesPerPart(PdfProcessingMode mode, AzureDocumentIntelligenceTier azureTier) =>
         mode == PdfProcessingMode.Azure
             ? azureTier == AzureDocumentIntelligenceTier.FreeF0 ? 2 : 100
             : 100;
 
+    /// <summary>
+    /// Selects a conservative default size limit for the active processing stack and Azure tier.
+    /// </summary>
+    /// <param name="mode">The processing mode.</param>
+    /// <param name="azureTier">The Azure tier when Azure processing is selected.</param>
+    /// <returns>The default maximum part size in decimal megabytes.</returns>
     private static int DefaultMaxPartSizeMb(PdfProcessingMode mode, AzureDocumentIntelligenceTier azureTier) =>
         mode == PdfProcessingMode.Azure
             ? azureTier == AzureDocumentIntelligenceTier.FreeF0 ? 3 : 100
             : 100;
 
+    /// <summary>
+    /// Ensures configured Azure part limits do not exceed the selected service tier's hard limits.
+    /// </summary>
+    /// <param name="mode">The processing mode.</param>
+    /// <param name="azureTier">The selected Azure tier.</param>
+    /// <param name="maxPagesPerPart">The configured page limit.</param>
+    /// <param name="maxPartSizeMb">The configured size limit in decimal megabytes.</param>
     private static void ValidateSplitLimits(
         PdfProcessingMode mode,
         AzureDocumentIntelligenceTier azureTier,
@@ -214,6 +260,7 @@ internal sealed record PdfConversionOptions(
             return;
         }
 
+        // These are service constraints, while the lower defaults above leave headroom for predictable uploads.
         var servicePageLimit = azureTier == AzureDocumentIntelligenceTier.FreeF0 ? 2 : 2000;
         var serviceSizeLimitMb = azureTier == AzureDocumentIntelligenceTier.FreeF0 ? 4 : 500;
 
@@ -230,8 +277,16 @@ internal sealed record PdfConversionOptions(
         }
     }
 
+    /// <summary>
+    /// Parses a positive integer option or returns its default.
+    /// </summary>
+    /// <param name="value">The configured value.</param>
+    /// <param name="defaultValue">The value used when no option is supplied.</param>
+    /// <param name="optionName">The option name used in validation messages.</param>
+    /// <returns>The positive configured or default value.</returns>
     private static int IntValue(string? value, int defaultValue, string optionName)
     {
+        // Zero is invalid because every caller uses the value as a divisor, batch size, or physical render setting.
         if (string.IsNullOrWhiteSpace(value))
         {
             return defaultValue;
@@ -245,8 +300,15 @@ internal sealed record PdfConversionOptions(
         return parsed;
     }
 
+    /// <summary>
+    /// Reads the value immediately following a named option.
+    /// </summary>
+    /// <param name="args">The command-line arguments.</param>
+    /// <param name="name">The option name.</param>
+    /// <returns>The option value, or <see langword="null"/> when absent.</returns>
     private static string? Value(string[] args, string name)
     {
+        // The CLI intentionally supports name/value pairs only; equals and combined forms are outside its contract.
         for (var i = 0; i < args.Length - 1; i++)
         {
             if (args[i].Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -258,6 +320,12 @@ internal sealed record PdfConversionOptions(
         return null;
     }
 
+    /// <summary>
+    /// Determines whether a case-insensitive flag is present.
+    /// </summary>
+    /// <param name="args">The command-line arguments.</param>
+    /// <param name="name">The flag name.</param>
+    /// <returns><see langword="true"/> when the flag is present.</returns>
     private static bool Has(string[] args, string name) =>
         args.Any(a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
 }
@@ -273,12 +341,21 @@ internal static class DocumentConversion
 {
     private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
+    /// <summary>
+    /// Routes a document to MarkItDown, local PDF inspection/OCR, or Azure Document Intelligence.
+    /// </summary>
+    /// <param name="input">The effective source document.</param>
+    /// <param name="output">The Markdown output path.</param>
+    /// <param name="options">The validated PDF conversion options.</param>
+    /// <param name="runMarkItDownAsync">The caller-provided MarkItDown process adapter.</param>
+    /// <returns>The normalized conversion result.</returns>
     public static async Task<DocumentConversionResult> ConvertAsync(
         string input,
         string output,
         PdfConversionOptions options,
         Func<string, string, Task<(int ExitCode, string stdout, string stderr)>> runMarkItDownAsync)
     {
+        // Non-PDF formats always use MarkItDown; PDF-specific modes must not change their established behavior.
         if (!Path.GetExtension(input).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
             || options.ProcessingMode == PdfProcessingMode.MarkItDown)
         {
@@ -294,6 +371,14 @@ internal static class DocumentConversion
         };
     }
 
+    /// <summary>
+    /// Uses extractable PDF text where sufficient and applies Tesseract only to pages that need OCR.
+    /// </summary>
+    /// <param name="input">The PDF source path.</param>
+    /// <param name="output">The Markdown output path.</param>
+    /// <param name="options">The local PDF options.</param>
+    /// <param name="runMarkItDownAsync">The MarkItDown adapter used for fully extractable PDFs.</param>
+    /// <returns>The normalized conversion result.</returns>
     private static async Task<DocumentConversionResult> ConvertLocalPdfAsync(
         string input,
         string output,
@@ -305,6 +390,7 @@ internal static class DocumentConversion
 
         if (inspection.OcrPageCount == 0)
         {
+            // MarkItDown preserves richer document structure, so it remains preferred when OCR adds no value.
             var result = await runMarkItDownAsync(input, output);
             return FromProcessResult(result, "markitdown", summary);
         }
@@ -324,6 +410,13 @@ internal static class DocumentConversion
             $"Local PDF processing completed. {summary}");
     }
 
+    /// <summary>
+    /// Splits a PDF as required, analyzes each part with Azure Layout, and merges Markdown in source order.
+    /// </summary>
+    /// <param name="input">The PDF source path.</param>
+    /// <param name="output">The Markdown output path.</param>
+    /// <param name="options">The Azure PDF options.</param>
+    /// <returns>The Azure conversion result.</returns>
     private static async Task<DocumentConversionResult> ConvertAzurePdfAsync(
         string input,
         string output,
@@ -334,6 +427,7 @@ internal static class DocumentConversion
 
         try
         {
+            // Parts are processed sequentially to preserve source ordering and avoid an uncontrolled Azure request burst.
             var markdown = new StringBuilder();
 
             for (var i = 0; i < parts.Count; i++)
@@ -367,10 +461,18 @@ internal static class DocumentConversion
         }
         finally
         {
+            // Temporary split files are an implementation detail and must be removed on success or failure.
             DeleteTemporaryParts(parts);
         }
     }
 
+    /// <summary>
+    /// Sends one PDF file or split part to the Azure prebuilt-layout model.
+    /// </summary>
+    /// <param name="client">The configured Document Intelligence client.</param>
+    /// <param name="input">The PDF part path.</param>
+    /// <param name="options">Options containing the optional locale.</param>
+    /// <returns>The Markdown content returned by Azure.</returns>
     private static async Task<string> AnalyzeAzurePdfPartAsync(
         DocumentIntelligenceClient client,
         string input,
@@ -387,12 +489,19 @@ internal static class DocumentConversion
             analyzeOptions.Locale = options.AzureLocale;
         }
 
+        // Waiting here keeps the CLI contract synchronous from the caller's perspective: success means output is complete.
         var operation = await client.AnalyzeDocumentAsync(WaitUntil.Completed, analyzeOptions);
         return operation.Value.Content ?? string.Empty;
     }
 
+    /// <summary>
+    /// Creates an Azure client using an explicit key when supplied, otherwise the default credential chain.
+    /// </summary>
+    /// <param name="options">Options containing the endpoint and optional API key.</param>
+    /// <returns>The configured client.</returns>
     private static DocumentIntelligenceClient CreateDocumentIntelligenceClient(PdfConversionOptions options)
     {
+        // The endpoint is validated while options are created, so null-forgiving use is safe at this boundary.
         var endpoint = new Uri(options.AzureEndpoint!);
         if (!string.IsNullOrWhiteSpace(options.AzureKey))
         {
@@ -403,6 +512,12 @@ internal static class DocumentConversion
         return new DocumentIntelligenceClient(endpoint, credential);
     }
 
+    /// <summary>
+    /// Produces source-page-ordered PDF parts that satisfy configured page and size limits.
+    /// </summary>
+    /// <param name="input">The source PDF path.</param>
+    /// <param name="options">The splitting limits and policy.</param>
+    /// <returns>The original file descriptor or temporary split descriptors.</returns>
     private static IReadOnlyList<PdfPart> CreateAzurePdfParts(string input, PdfConversionOptions options)
     {
         using var document = PdfDocument.Open(input);
@@ -454,6 +569,7 @@ internal static class DocumentConversion
                         $"which exceeds the configured {FormatBytes(options.MaxPartSizeBytes)} per-part limit.");
                 }
 
+                // Halving converges quickly without assuming that compressed size is proportional to page count.
                 candidatePageCount = Math.Max(1, candidatePageCount / 2);
             }
         }
@@ -461,8 +577,16 @@ internal static class DocumentConversion
         return parts;
     }
 
+    /// <summary>
+    /// Copies an inclusive one-based page range into a uniquely named temporary PDF.
+    /// </summary>
+    /// <param name="document">The open source PDF.</param>
+    /// <param name="startPage">The first one-based source page.</param>
+    /// <param name="endPage">The last one-based source page.</param>
+    /// <returns>The temporary part descriptor.</returns>
     private static PdfPart CreatePdfPart(PdfDocument document, int startPage, int endPage)
     {
+        // PdfPig's builder consumes one-based page numbers, matching the values shown in user-facing diagnostics.
         var tempPath = Path.Combine(
             Path.GetTempPath(),
             $"doc2md-pdf-part-{Guid.NewGuid():N}-pages-{startPage}-{endPage}.pdf");
@@ -477,14 +601,23 @@ internal static class DocumentConversion
         return new PdfPart(tempPath, startPage, endPage, new FileInfo(tempPath).Length, IsTemporary: true);
     }
 
+    /// <summary>
+    /// Best-effort deletes every temporary part in a conversion set.
+    /// </summary>
+    /// <param name="parts">The source and temporary part descriptors.</param>
     private static void DeleteTemporaryParts(IEnumerable<PdfPart> parts)
     {
+        // Original source descriptors are included in the collection but are protected by IsTemporary.
         foreach (var part in parts)
         {
             DeleteTemporaryPart(part);
         }
     }
 
+    /// <summary>
+    /// Best-effort deletes one generated PDF part without masking the primary conversion outcome.
+    /// </summary>
+    /// <param name="part">The part descriptor.</param>
     private static void DeleteTemporaryPart(PdfPart part)
     {
         if (!part.IsTemporary)
@@ -505,21 +638,40 @@ internal static class DocumentConversion
         }
     }
 
+    /// <summary>
+    /// Builds a concise diagnostic summary of a PDF part set.
+    /// </summary>
+    /// <param name="parts">The part descriptors.</param>
+    /// <returns>A part, page, and largest-size summary.</returns>
     private static string DescribePdfParts(IReadOnlyList<PdfPart> parts)
     {
+        // Page ranges are authoritative even when a rewritten part's byte size differs from the source encoding.
         var totalPages = parts.Sum(part => part.EndPage - part.StartPage + 1);
         var maxSize = parts.Count == 0 ? 0 : parts.Max(part => part.SizeBytes);
         return $"{parts.Count} part(s), {totalPages} page(s), largest part {FormatBytes(maxSize)}.";
     }
 
+    /// <summary>
+    /// Formats bytes as invariant-culture decimal megabytes.
+    /// </summary>
+    /// <param name="bytes">The byte count.</param>
+    /// <returns>The formatted size.</returns>
     private static string FormatBytes(long bytes)
     {
+        // Azure documents its upload limits in decimal MB, so use 1,000,000 bytes rather than MiB.
         var megabytes = bytes / 1_000_000d;
         return string.Create(CultureInfo.InvariantCulture, $"{megabytes:0.##} MB");
     }
 
+    /// <summary>
+    /// Classifies each PDF page by the amount of meaningful extractable text it contains.
+    /// </summary>
+    /// <param name="input">The source PDF path.</param>
+    /// <param name="textThreshold">The minimum non-whitespace character count for an extractable page.</param>
+    /// <returns>The per-page inspection result.</returns>
     private static PdfInspectionResult InspectPdf(string input, int textThreshold)
     {
+        // Classification is page-based because mixed PDFs require OCR only where the text layer is absent or inadequate.
         using var document = PdfDocument.Open(input);
         var pages = new List<PdfPageInspection>();
 
@@ -537,12 +689,21 @@ internal static class DocumentConversion
         return new PdfInspectionResult(pages);
     }
 
+    /// <summary>
+    /// Builds page-ordered Markdown from extracted text and OCR results in a single Tesseract session.
+    /// </summary>
+    /// <param name="input">The source PDF path.</param>
+    /// <param name="inspection">The page classifications and extracted text.</param>
+    /// <param name="options">The OCR and batching options.</param>
+    /// <param name="tessdataPath">The validated trained-data directory.</param>
+    /// <returns>The combined Markdown document.</returns>
     private static string BuildLocalMixedMarkdown(
         string input,
         PdfInspectionResult inspection,
         PdfConversionOptions options,
         string tessdataPath)
     {
+        // Reuse one engine because loading multiple language models is expensive and pages are processed serially.
         using var engine = new TesseractEngine(tessdataPath, options.OcrLanguages, EngineMode.Default)
         {
             DefaultPageSegMode = PageSegMode.Auto
@@ -588,28 +749,42 @@ internal static class DocumentConversion
         return markdown.ToString();
     }
 
+    /// <summary>
+    /// Partitions inspected pages into stable source-order batches.
+    /// </summary>
+    /// <param name="pages">The inspected pages.</param>
+    /// <param name="maxPagesPerPart">The maximum batch size.</param>
+    /// <returns>The lazily generated batches.</returns>
     private static IEnumerable<IReadOnlyList<PdfPageInspection>> GetPageBatches(
         IReadOnlyList<PdfPageInspection> pages,
         int maxPagesPerPart)
     {
+        // Option validation guarantees a positive batch size, preventing a non-advancing iterator.
         for (var i = 0; i < pages.Count; i += maxPagesPerPart)
         {
             yield return pages.Skip(i).Take(maxPagesPerPart).ToArray();
         }
     }
 
+    /// <summary>
+    /// Renders one PDF page to a temporary image and recognizes it with an existing Tesseract engine.
+    /// </summary>
+    /// <param name="input">The source PDF path.</param>
+    /// <param name="pageNumber">The one-based source page number.</param>
+    /// <param name="options">The render and OCR options.</param>
+    /// <param name="engine">The initialized Tesseract engine.</param>
+    /// <returns>Normalized recognized text.</returns>
     private static string OcrPage(
         string input,
         int pageNumber,
         PdfConversionOptions options,
         TesseractEngine engine)
     {
-        var tempImage = Path.Combine(
-            Path.GetTempPath(),
-            $"doc2md-{Path.GetFileNameWithoutExtension(input)}-{Guid.NewGuid():N}-page-{pageNumber}.png");
+        var tempImage = CreateOcrTemporaryImagePath(pageNumber);
 
         try
         {
+            // Grayscale and tiling reduce memory pressure while retaining enough contrast for document OCR.
             var renderOptions = new RenderOptions
             {
                 Dpi = options.RenderDpi,
@@ -651,11 +826,29 @@ internal static class DocumentConversion
         }
     }
 
+    /// <summary>
+    /// Creates an ASCII-only OCR image path so native Tesseract file APIs do
+    /// not receive source filenames containing unsupported characters.
+    /// </summary>
+    /// <param name="pageNumber">The one-based PDF page number.</param>
+    /// <returns>A unique PNG path below the operating-system temporary folder.</returns>
+    internal static string CreateOcrTemporaryImagePath(int pageNumber) =>
+        Path.Combine(
+            Path.GetTempPath(),
+            $"doc2md-{Guid.NewGuid():N}-page-{pageNumber}.png");
+
+    /// <summary>
+    /// Renders a PDF page with Docnet when PDFtoImage cannot decode the document.
+    /// </summary>
+    /// <param name="outputPath">The PNG output path.</param>
+    /// <param name="inputPath">The source PDF path.</param>
+    /// <param name="zeroBasedPageIndex">The zero-based page index required by Docnet.</param>
     private static void RenderPageWithDocnet(
         string outputPath,
         string inputPath,
         int zeroBasedPageIndex)
     {
+        // Fixed fallback dimensions favor readable OCR output without reproducing potentially extreme source page sizes.
         using var document = DocLib.Instance.GetDocReader(
             inputPath,
             new PageDimensions(1700, 2200));
@@ -667,8 +860,14 @@ internal static class DocumentConversion
         image.Save(outputPath, new PngEncoder());
     }
 
+    /// <summary>
+    /// Resolves Tesseract trained data from explicit options, the package layout, or conventional installations.
+    /// </summary>
+    /// <param name="options">Options containing an optional explicit trained-data path.</param>
+    /// <returns>The resolved trained-data directory.</returns>
     private static string ResolveTessdataPath(PdfConversionOptions options)
     {
+        // Explicit paths remain authoritative so validation reports the caller's precise configuration error.
         if (!string.IsNullOrWhiteSpace(options.TessdataPath))
         {
             return Path.GetFullPath(options.TessdataPath);
@@ -693,6 +892,11 @@ internal static class DocumentConversion
             "Set --tessdata or DOC2MD_TESSDATA_PATH to a folder containing eng.traineddata and/or pol.traineddata.");
     }
 
+    /// <summary>
+    /// Ensures every requested OCR language has a corresponding trained-data model.
+    /// </summary>
+    /// <param name="tessdataPath">The trained-data directory.</param>
+    /// <param name="languages">The Tesseract language expression.</param>
     private static void ValidateTessdataLanguages(string tessdataPath, string languages)
     {
         if (!Directory.Exists(tessdataPath))
@@ -700,6 +904,7 @@ internal static class DocumentConversion
             throw new DirectoryNotFoundException($"Tesseract tessdata folder was not found: {tessdataPath}");
         }
 
+        // Accept Tesseract's plus syntax and common list separators used by configuration systems.
         var missing = languages
             .Split(['+', ',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(language => !File.Exists(Path.Combine(tessdataPath, $"{language}.traineddata")))
@@ -712,8 +917,14 @@ internal static class DocumentConversion
         }
     }
 
+    /// <summary>
+    /// Extracts readable text from a PdfPig page, preferring word boundaries over raw content order.
+    /// </summary>
+    /// <param name="page">The source page.</param>
+    /// <returns>The best available extracted text.</returns>
     private static string ExtractPageText(UglyToad.PdfPig.Content.Page page)
     {
+        // Word extraction generally restores spacing that is absent from a PDF's raw text stream.
         var words = page.GetWords()
             .Select(word => word.Text)
             .Where(word => !string.IsNullOrWhiteSpace(word))
@@ -724,8 +935,14 @@ internal static class DocumentConversion
             : page.Text ?? string.Empty;
     }
 
+    /// <summary>
+    /// Normalizes line endings, removes trailing whitespace, and trims surrounding blank content.
+    /// </summary>
+    /// <param name="text">The extracted or recognized text.</param>
+    /// <returns>Platform-normalized Markdown text.</returns>
     private static string NormalizeMarkdownText(string text)
     {
+        // Normalize through LF first so mixed line endings cannot produce duplicate blank lines on Windows.
         var lines = text.Replace("\r\n", "\n").Replace('\r', '\n')
             .Split('\n')
             .Select(line => line.TrimEnd());
@@ -733,17 +950,34 @@ internal static class DocumentConversion
         return string.Join(Environment.NewLine, lines).Trim();
     }
 
+    /// <summary>
+    /// Counts non-whitespace characters used by the extractable-text threshold.
+    /// </summary>
+    /// <param name="text">The page text.</param>
+    /// <returns>The meaningful character count.</returns>
     private static int CountMeaningfulCharacters(string text) =>
         text.Count(character => !char.IsWhiteSpace(character));
 
+    /// <summary>
+    /// Adapts a MarkItDown process tuple to the shared conversion result contract.
+    /// </summary>
+    /// <param name="result">The process result.</param>
+    /// <param name="converter">The converter identifier.</param>
+    /// <param name="inspectionSummary">An optional PDF inspection summary.</param>
+    /// <returns>The normalized conversion result.</returns>
     private static DocumentConversionResult FromProcessResult(
         (int ExitCode, string stdout, string stderr) result,
         string converter,
         string? inspectionSummary) =>
         new(result.ExitCode, converter, inspectionSummary, result.stdout, result.stderr);
 
+    /// <summary>
+    /// Finds the nearest ancestor containing the vendored MarkItDown source layout.
+    /// </summary>
+    /// <returns>The DOC2MD root, or the current directory when discovery fails.</returns>
     private static string FindRepoRoot()
     {
+        // The same marker exists in development checkouts and dependency-complete installer payloads.
         var current = new DirectoryInfo(AppContext.BaseDirectory);
         while (current is not null)
         {
@@ -767,6 +1001,10 @@ internal sealed record PdfInspectionResult(IReadOnlyList<PdfPageInspection> Page
 
     public int OcrPageCount => Pages.Count - TextPageCount;
 
+    /// <summary>
+    /// Formats the page classification totals for logs and structured results.
+    /// </summary>
+    /// <returns>The inspection summary.</returns>
     public string ToSummary() =>
         $"{PageCount} page(s), {TextPageCount} extractable text page(s), {OcrPageCount} OCR page(s).";
 }

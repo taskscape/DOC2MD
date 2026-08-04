@@ -11,3 +11,5 @@ artifacts/cache/
 artifacts/installer/
 artifacts/installer-build/
 artifacts/installer-code-check/
+tests/DOC2MD.Cli.Tests/bin
+tests/DOC2MD.Cli.Tests/obj
