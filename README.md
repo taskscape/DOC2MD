@@ -23,7 +23,7 @@ The installer contains the Python runtime and libraries, both OCR models, LibreO
 
 Installed entry points are `DOC2MD.Gui.exe`, `DOC2MD.Cli.exe`, `DOC2MD.Api.exe`, and `DOC2MD.Mcp.exe`. The installer adds a Start menu shortcut for the GUI and can optionally add the install directory to the current user's `PATH`.
 
-Every push to `main` or `master` runs `.github\workflows\publish-installer.yml`. The workflow assigns version `1.0.<run-number>`, builds and verifies the complete installer, creates a SHA-256 checksum, and publishes both files in a non-draft GitHub Release tagged `v1.0.<run-number>`. Re-running the same workflow run updates the existing release assets without assigning a different version.
+Every push to `main` or `master` runs `.github\workflows\publish-installer.yml`. The workflow assigns version `1.0.<run-number>`, builds and verifies the complete installer, creates SHA-256 checksums, and publishes versioned plus stable-name assets in a non-draft GitHub Release tagged `v1.0.<run-number>`. The stable `DOC2MD-win-x64-Setup.exe` and `DOC2MD-win-x64-Setup.exe.sha256` aliases support dependent installers through GitHub's `releases/latest/download` route. Re-running the same workflow run updates all existing release assets without assigning a different version.
 
 ## MarkItDown on Windows without Docker
 

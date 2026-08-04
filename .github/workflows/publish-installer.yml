@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   release:
-    name: Build and publish versioned Windows installer
+    name: Build and publish Windows installer
     runs-on: windows-2025
     timeout-minutes: 60
 
@@ -80,7 +80,7 @@ jobs:
         run: |
           ./installer/Build-Installer.ps1 -Version '${{ steps.version.outputs.version }}'
 
-      - name: Create the checksum manifest
+      - name: Create versioned and stable release assets
         id: artifact
         shell: pwsh
         run: |
@@ -96,8 +96,23 @@ jobs:
           "$digest  $([System.IO.Path]::GetFileName($installer))" |
               Set-Content -LiteralPath $checksum -Encoding ascii
 
+          # Stable aliases let dependent installers use GitHub's releases/latest/download URL.
+          $stableInstaller = Join-Path ([System.IO.Path]::GetDirectoryName($installer)) 'DOC2MD-win-x64-Setup.exe'
+          $stableChecksum = "$stableInstaller.sha256"
+          Copy-Item -LiteralPath $installer -Destination $stableInstaller -Force
+          $stableDigest = (Get-FileHash -LiteralPath $stableInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($stableDigest -ne $digest)
+          {
+              throw 'The stable installer alias does not match the verified versioned installer.'
+          }
+
+          "$digest  $([System.IO.Path]::GetFileName($stableInstaller))" |
+              Set-Content -LiteralPath $stableChecksum -Encoding ascii
+
           "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "checksum=$checksum" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "stable_installer=$stableInstaller" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "stable_checksum=$stableChecksum" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Create or update the GitHub release
         shell: pwsh
@@ -107,6 +122,8 @@ jobs:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
           INSTALLER_PATH: ${{ steps.artifact.outputs.installer }}
           CHECKSUM_PATH: ${{ steps.artifact.outputs.checksum }}
+          STABLE_INSTALLER_PATH: ${{ steps.artifact.outputs.stable_installer }}
+          STABLE_CHECKSUM_PATH: ${{ steps.artifact.outputs.stable_checksum }}
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
           $releaseJson = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft 2>$null
@@ -137,7 +154,11 @@ jobs:
               }
           }
 
-          & gh release upload $env:RELEASE_TAG $env:INSTALLER_PATH $env:CHECKSUM_PATH `
+          & gh release upload $env:RELEASE_TAG `
+              $env:INSTALLER_PATH `
+              $env:CHECKSUM_PATH `
+              $env:STABLE_INSTALLER_PATH `
+              $env:STABLE_CHECKSUM_PATH `
               --repo $env:GITHUB_REPOSITORY `
               --clobber
           if ($LASTEXITCODE -ne 0)
@@ -171,7 +192,9 @@ jobs:
 
           $expectedAssets = @(
               "DOC2MD-$env:RELEASE_VERSION-win-x64-Setup.exe",
-              "DOC2MD-$env:RELEASE_VERSION-win-x64-Setup.exe.sha256"
+              "DOC2MD-$env:RELEASE_VERSION-win-x64-Setup.exe.sha256",
+              'DOC2MD-win-x64-Setup.exe',
+              'DOC2MD-win-x64-Setup.exe.sha256'
           )
           $publishedAssets = @($release.assets | ForEach-Object { $_.name })
           foreach ($expectedAsset in $expectedAssets)
@@ -182,4 +205,4 @@ jobs:
               }
           }
 
-          Write-Host "Verified release $env:RELEASE_TAG with both expected assets."
+          Write-Host "Verified release $env:RELEASE_TAG with all versioned and stable assets."
