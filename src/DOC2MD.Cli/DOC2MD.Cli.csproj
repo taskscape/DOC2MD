@@ -2,7 +2,8 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;osx-arm64;osx-x64</RuntimeIdentifiers>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
@@ -14,8 +15,30 @@
     <PackageReference Include="PDFtoImage" Version="5.2.1" />
     <PackageReference Include="Docnet.Core" Version="2.6.0" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
-    <PackageReference Include="Tesseract" Version="5.2.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\lib\packages\markitdown\src\**\*">
+      <Link>Resources\markitdown\src\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\lib\packages\markitdown\pyproject.toml">
+      <Link>Resources\markitdown\pyproject.toml</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\lib\packages\markitdown\README.md">
+      <Link>Resources\markitdown\README.md</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\lib\packages\markitdown\ThirdPartyNotices.md">
+      <Link>Resources\markitdown\ThirdPartyNotices.md</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

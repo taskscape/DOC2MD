@@ -1,0 +1,13 @@
+#!/bin/sh
+
+set -eu
+
+if [ -x "/Applications/LibreOffice.app/Contents/MacOS/soffice" ] \
+  || [ -x "/opt/homebrew/bin/soffice" ] \
+  || [ -x "/usr/local/bin/soffice" ] \
+  || command -v soffice >/dev/null 2>&1; then
+  exit 0
+fi
+
+echo "DOC2MD requires LibreOffice. Install LibreOffice in /Applications before installing DOC2MD." >&2
+exit 1

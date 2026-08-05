@@ -3,11 +3,11 @@
     Publishes DOC2MD and builds a dependency-complete Inno Setup installer.
 
 .DESCRIPTION
-    Creates framework-dependent Windows x64 executables, stages a portable
+    Creates self-contained Windows x64 CLI, GUI, API, and MCP frontends; stages a portable
     Python/MarkItDown runtime, English and Polish OCR data, and LibreOffice,
     validates the staged payload, then compiles a versioned installer.
 
-    The generated installer intentionally does not include the .NET runtime.
+    The generated installer includes the .NET runtime.
 #>
 [CmdletBinding()]
 param(
@@ -25,6 +25,8 @@ param(
 
     [string] $LibreOfficePath = '',
 
+    [string] $TesseractPath = '',
+
     [string] $IsccPath = ''
 )
 
@@ -36,6 +38,7 @@ $repositoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoo
 $artifactsRoot = Join-Path $repositoryRoot 'artifacts'
 $buildRoot = Join-Path $artifactsRoot 'installer-build'
 $payloadDirectory = Join-Path $buildRoot 'payload'
+$resourcesDirectory = Join-Path $payloadDirectory 'Resources'
 $cacheDirectory = Join-Path $artifactsRoot 'cache'
 $outputDirectory = Join-Path $artifactsRoot 'installer'
 $installerDefinition = Join-Path $PSScriptRoot 'DOC2MD.iss'
@@ -191,6 +194,50 @@ function Resolve-LibreOfficeRoot
     throw 'LibreOffice was not found. Install LibreOffice or pass -LibreOfficePath with its installation root.'
 }
 
+function Resolve-TesseractRoot
+{
+    param([string] $ExplicitPath)
+
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitPath))
+    {
+        $candidates += $ExplicitPath
+    }
+
+    $command = Get-Command 'tesseract.exe' -ErrorAction SilentlyContinue
+    if ($null -ne $command)
+    {
+        $candidates += $command.Source
+    }
+
+    $candidates += @(
+        (Join-Path $env:ProgramW6432 'Tesseract-OCR'),
+        (Join-Path $env:ProgramFiles 'Tesseract-OCR'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Tesseract-OCR')
+    )
+
+    foreach ($candidate in $candidates)
+    {
+        if ([string]::IsNullOrWhiteSpace($candidate))
+        {
+            continue
+        }
+
+        $candidatePath = [System.IO.Path]::GetFullPath($candidate)
+        if (Test-Path -LiteralPath $candidatePath -PathType Leaf)
+        {
+            $candidatePath = Split-Path -Parent $candidatePath
+        }
+
+        if (Test-Path -LiteralPath (Join-Path $candidatePath 'tesseract.exe') -PathType Leaf)
+        {
+            return $candidatePath
+        }
+    }
+
+    throw 'Tesseract OCR was not found. Install Tesseract OCR or pass -TesseractPath with its installation root.'
+}
+
 function Publish-Project
 {
     param(
@@ -203,7 +250,7 @@ function Publish-Project
         '--nologo',
         '--configuration', $Configuration,
         '--runtime', $Runtime,
-        '--self-contained', 'false',
+        '--self-contained', 'true',
         '--output', $payloadDirectory,
         "-p:Version=$Version",
         "-p:FileVersion=$script:versionInfoVersion",
@@ -249,28 +296,24 @@ $versionInfoVersion = $versionParts[0..3] -join '.'
 $outputBaseFilename = "DOC2MD-$Version-$Runtime-Setup"
 $expectedInstaller = Join-Path $outputDirectory "$outputBaseFilename.exe"
 
-Write-Host 'Publishing DOC2MD .NET entry points (framework-dependent)...' -ForegroundColor Cyan
-foreach ($project in @(
-    'src\DOC2MD.Cli\DOC2MD.Cli.csproj',
-    'src\DOC2MD.Gui\DOC2MD.Gui.csproj',
-    'src\DOC2MD.Api\DOC2MD.Api.csproj',
-    'src\DOC2MD.Mcp\DOC2MD.Mcp.csproj'
-))
-{
-    Publish-Project -ProjectPath (Join-Path $repositoryRoot $project)
-}
-
-foreach ($executable in @('DOC2MD.Cli.exe', 'DOC2MD.Gui.exe', 'DOC2MD.Api.exe', 'DOC2MD.Mcp.exe'))
-{
-    Assert-File -Path (Join-Path $payloadDirectory $executable) -Description $executable
-}
+Write-Host 'Publishing the self-contained DOC2MD CLI...' -ForegroundColor Cyan
+Publish-Project -ProjectPath (Join-Path $repositoryRoot 'src\DOC2MD.Cli\DOC2MD.Cli.csproj')
+Assert-File -Path (Join-Path $payloadDirectory 'DOC2MD.Cli.exe') -Description 'DOC2MD.Cli.exe'
+Write-Host 'Publishing the self-contained Avalonia GUI, API, and MCP frontends...' -ForegroundColor Cyan
+Publish-Project -ProjectPath (Join-Path $repositoryRoot 'src\DOC2MD.Gui\DOC2MD.Gui.csproj')
+Publish-Project -ProjectPath (Join-Path $repositoryRoot 'src\DOC2MD.Api\DOC2MD.Api.csproj')
+Publish-Project -ProjectPath (Join-Path $repositoryRoot 'src\DOC2MD.Mcp\DOC2MD.Mcp.csproj')
+Assert-File -Path (Join-Path $payloadDirectory 'DOC2MD.Gui.exe') -Description 'DOC2MD.Gui.exe'
+Assert-File -Path (Join-Path $payloadDirectory 'DOC2MD.Api.exe') -Description 'DOC2MD.Api.exe'
+Assert-File -Path (Join-Path $payloadDirectory 'DOC2MD.Mcp.exe') -Description 'DOC2MD.Mcp.exe'
+New-Item -ItemType Directory -Path $resourcesDirectory -Force | Out-Null
 
 Write-Host 'Staging the portable Python and MarkItDown runtime...' -ForegroundColor Cyan
 $pythonArchive = Join-Path $cacheDirectory "python-$PythonVersion-embed-amd64.zip"
 $pythonUri = [uri] "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip"
 Get-CachedDownload -Uri $pythonUri -Destination $pythonArchive -MinimumBytes 5MB
 
-$pythonRoot = Join-Path $payloadDirectory '.markitdown-venv\Scripts'
+$pythonRoot = Join-Path $resourcesDirectory 'python'
 New-Item -ItemType Directory -Path $pythonRoot -Force | Out-Null
 Expand-Archive -LiteralPath $pythonArchive -DestinationPath $pythonRoot -Force
 
@@ -326,7 +369,7 @@ Invoke-CheckedCommand -Description 'Installing MarkItDown and all optional Pytho
     $markItDownSpecifier
 )
 
-$vendoredMarkItDown = Join-Path $payloadDirectory 'lib\packages\markitdown'
+$vendoredMarkItDown = Join-Path $resourcesDirectory 'markitdown'
 New-Item -ItemType Directory -Path $vendoredMarkItDown -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $markItDownPackage 'src') -Destination $vendoredMarkItDown -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $markItDownPackage 'README.md') -Destination $vendoredMarkItDown -Force
@@ -348,7 +391,7 @@ finally
 }
 
 Write-Host 'Staging English and Polish Tesseract OCR models...' -ForegroundColor Cyan
-$tessdataDirectory = Join-Path $payloadDirectory 'tessdata'
+$tessdataDirectory = Join-Path $resourcesDirectory 'tessdata'
 New-Item -ItemType Directory -Path $tessdataDirectory -Force | Out-Null
 foreach ($language in @('eng', 'pol'))
 {
@@ -360,7 +403,7 @@ foreach ($language in @('eng', 'pol'))
 
 Write-Host 'Staging the complete LibreOffice runtime...' -ForegroundColor Cyan
 $libreOfficeSource = Resolve-LibreOfficeRoot -ExplicitPath $LibreOfficePath
-$libreOfficeDestination = Join-Path $payloadDirectory 'runtime\libreoffice'
+$libreOfficeDestination = Join-Path $resourcesDirectory 'libreoffice'
 New-Item -ItemType Directory -Path $libreOfficeDestination -Force | Out-Null
 $libreOfficeItems = Get-ChildItem -LiteralPath $libreOfficeSource -Force
 Copy-Item -LiteralPath $libreOfficeItems.FullName -Destination $libreOfficeDestination -Recurse -Force
@@ -368,6 +411,16 @@ Copy-Item -LiteralPath $libreOfficeItems.FullName -Destination $libreOfficeDesti
 $stagedSoffice = Join-Path $libreOfficeDestination 'program\soffice.exe'
 Assert-File -Path $stagedSoffice -Description 'LibreOffice soffice.exe'
 Invoke-CheckedCommand -Description 'Starting the staged LibreOffice runtime' -FilePath $stagedSoffice -ArgumentList @('--headless', '--version')
+
+Write-Host 'Staging the native Tesseract OCR runtime...' -ForegroundColor Cyan
+$tesseractSource = Resolve-TesseractRoot -ExplicitPath $TesseractPath
+$tesseractDestination = Join-Path $resourcesDirectory 'tesseract'
+New-Item -ItemType Directory -Path $tesseractDestination -Force | Out-Null
+$tesseractItems = Get-ChildItem -LiteralPath $tesseractSource -Force
+Copy-Item -LiteralPath $tesseractItems.FullName -Destination $tesseractDestination -Recurse -Force
+$stagedTesseract = Join-Path $tesseractDestination 'tesseract.exe'
+Assert-File -Path $stagedTesseract -Description 'Tesseract tesseract.exe'
+Invoke-CheckedCommand -Description 'Starting the staged Tesseract runtime' -FilePath $stagedTesseract -ArgumentList @('--version')
 
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'README.md') -Destination $payloadDirectory -Force
 

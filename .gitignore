@@ -1,4 +1,4 @@
-﻿.vs
+.vs
 src/DOC2MD.Api/bin
 src/DOC2MD.Api/obj
 src/DOC2MD.Cli/bin
@@ -11,5 +11,10 @@ artifacts/cache/
 artifacts/installer/
 artifacts/installer-build/
 artifacts/installer-code-check/
+artifacts/mac-installer-build/
+artifacts/cross-publish/
+artifacts/sample-tests/
 tests/DOC2MD.Cli.Tests/bin
 tests/DOC2MD.Cli.Tests/obj
+tests/DOC2MD.Integration.Tests/bin
+tests/DOC2MD.Integration.Tests/obj

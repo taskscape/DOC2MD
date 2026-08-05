@@ -10,7 +10,6 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Png;
 using SixLabors.ImageSharp.PixelFormats;
 using PDFtoImage;
-using Tesseract;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Writer;
 
@@ -398,7 +397,7 @@ internal static class DocumentConversion
         var tessdataPath = ResolveTessdataPath(options);
         ValidateTessdataLanguages(tessdataPath, options.OcrLanguages);
 
-        var markdown = BuildLocalMixedMarkdown(input, inspection, options, tessdataPath);
+        var markdown = await BuildLocalMixedMarkdownAsync(input, inspection, options, tessdataPath);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         await File.WriteAllTextAsync(output, markdown, Utf8NoBom);
 
@@ -690,24 +689,20 @@ internal static class DocumentConversion
     }
 
     /// <summary>
-    /// Builds page-ordered Markdown from extracted text and OCR results in a single Tesseract session.
+    /// Builds page-ordered Markdown from extracted text and native Tesseract OCR results.
     /// </summary>
     /// <param name="input">The source PDF path.</param>
     /// <param name="inspection">The page classifications and extracted text.</param>
     /// <param name="options">The OCR and batching options.</param>
     /// <param name="tessdataPath">The validated trained-data directory.</param>
     /// <returns>The combined Markdown document.</returns>
-    private static string BuildLocalMixedMarkdown(
+    private static async Task<string> BuildLocalMixedMarkdownAsync(
         string input,
         PdfInspectionResult inspection,
         PdfConversionOptions options,
         string tessdataPath)
     {
-        // Reuse one engine because loading multiple language models is expensive and pages are processed serially.
-        using var engine = new TesseractEngine(tessdataPath, options.OcrLanguages, EngineMode.Default)
-        {
-            DefaultPageSegMode = PageSegMode.Auto
-        };
+        var engine = await TesseractOcrEngine.CreateAsync(tessdataPath, options.OcrLanguages);
 
         var markdown = new StringBuilder();
         markdown.AppendLine($"<!-- DOC2MD local PDF processing: {inspection.TextPageCount} extracted page(s), {inspection.OcrPageCount} OCR page(s). -->");
@@ -731,7 +726,7 @@ internal static class DocumentConversion
 
                 var pageText = page.HasExtractableText
                     ? page.Text
-                    : OcrPage(input, page.PageNumber, options, engine);
+                    : await OcrPageAsync(input, page.PageNumber, options, engine);
 
                 if (string.IsNullOrWhiteSpace(pageText))
                 {
@@ -767,18 +762,18 @@ internal static class DocumentConversion
     }
 
     /// <summary>
-    /// Renders one PDF page to a temporary image and recognizes it with an existing Tesseract engine.
+    /// Renders one PDF page to a temporary image and recognizes it with the cross-platform Tesseract wrapper.
     /// </summary>
     /// <param name="input">The source PDF path.</param>
     /// <param name="pageNumber">The one-based source page number.</param>
     /// <param name="options">The render and OCR options.</param>
-    /// <param name="engine">The initialized Tesseract engine.</param>
+    /// <param name="engine">The initialized native Tesseract process wrapper.</param>
     /// <returns>Normalized recognized text.</returns>
-    private static string OcrPage(
+    private static async Task<string> OcrPageAsync(
         string input,
         int pageNumber,
         PdfConversionOptions options,
-        TesseractEngine engine)
+        TesseractOcrEngine engine)
     {
         var tempImage = CreateOcrTemporaryImagePath(pageNumber);
 
@@ -806,9 +801,7 @@ internal static class DocumentConversion
             }
 #pragma warning restore CA1416
 
-            using var pix = Pix.LoadFromFile(tempImage);
-            using var page = engine.Process(pix, PageSegMode.Auto);
-            return NormalizeMarkdownText(page.GetText() ?? string.Empty);
+            return NormalizeMarkdownText(await engine.RecognizeAsync(tempImage));
         }
         finally
         {
@@ -875,13 +868,19 @@ internal static class DocumentConversion
 
         var candidates = new[]
         {
-            Path.Combine(FindRepoRoot(), "tessdata"),
+            ApplicationPaths.BundledTessdataRoot,
             Path.Combine(Directory.GetCurrentDirectory(), "tessdata"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tesseract-OCR", "tessdata"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Tesseract-OCR", "tessdata")
+            OperatingSystem.IsMacOS() ? "/opt/homebrew/share/tessdata" : string.Empty,
+            OperatingSystem.IsMacOS() ? "/usr/local/share/tessdata" : string.Empty,
+            OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tesseract-OCR", "tessdata")
+                : string.Empty,
+            OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Tesseract-OCR", "tessdata")
+                : string.Empty
         };
 
-        var existing = candidates.FirstOrDefault(Directory.Exists);
+        var existing = candidates.Where(path => !string.IsNullOrWhiteSpace(path)).FirstOrDefault(Directory.Exists);
         if (existing is not null)
         {
             return existing;
@@ -971,26 +970,6 @@ internal static class DocumentConversion
         string? inspectionSummary) =>
         new(result.ExitCode, converter, inspectionSummary, result.stdout, result.stderr);
 
-    /// <summary>
-    /// Finds the nearest ancestor containing the vendored MarkItDown source layout.
-    /// </summary>
-    /// <returns>The DOC2MD root, or the current directory when discovery fails.</returns>
-    private static string FindRepoRoot()
-    {
-        // The same marker exists in development checkouts and dependency-complete installer payloads.
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
-        while (current is not null)
-        {
-            if (Directory.Exists(Path.Combine(current.FullName, "lib", "packages", "markitdown", "src")))
-            {
-                return current.FullName;
-            }
-
-            current = current.Parent;
-        }
-
-        return Directory.GetCurrentDirectory();
-    }
 }
 
 internal sealed record PdfInspectionResult(IReadOnlyList<PdfPageInspection> Pages)

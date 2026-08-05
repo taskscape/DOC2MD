@@ -1,210 +1,200 @@
 # DOC2MD
 
-DOC2MD is a high fidelity converter of different office documents to markdown format. It provides CLI, API, MCP interfaces wrapping around the vendored Microsoft MarkItDown source in `lib`, Microsoft Document Intelligence and open source OCR/PDF conversion libraries.
+DOC2MD is a .NET 10 document-conversion suite for Windows and macOS. It combines the vendored Microsoft MarkItDown source, local PDF inspection and native Tesseract OCR, LibreOffice modernization, and optional Azure AI Document Intelligence processing.
 
-## Projects
+The solution and installers contain four cross-platform frontends:
 
-- `DOC2MD.Cli` converts one document or a folder of supported documents.
-- `DOC2MD.Gui` is a WPF desktop front end that calls the CLI.
-- `DOC2MD.Api` is an ASP.NET Core REST API suitable for IIS hosting and calls the CLI.
-- `DOC2MD.Mcp` is a stdio MCP server exposing the same conversion operations as tools.
+- `DOC2MD.Gui`: Avalonia desktop application
+- `DOC2MD.Cli`: command-line converter and shared process boundary
+- `DOC2MD.Api`: ASP.NET Core HTTP API
+- `DOC2MD.Mcp`: stdio MCP server
 
-## Windows installer
+## Runtime requirements
 
-Build the complete Windows x64 installer from the repository root:
+LibreOffice is required for every DOC2MD conversion. DOC2MD checks that `soffice --headless --version` starts successfully before processing input and returns an error when it cannot be found.
+
+Standard locations are detected automatically:
+
+- Windows installer payload and `Program Files\LibreOffice\program\soffice.exe`
+- `/Applications/LibreOffice.app/Contents/MacOS/soffice`
+- Homebrew paths on Apple Silicon and Intel macOS
+- `soffice` on `PATH`
+
+Set `DOC2MD_SOFFICE_PATH` when LibreOffice is installed elsewhere. The value may be the executable or the LibreOffice installation root.
+
+## Installers
+
+### Windows x64
+
+The Windows installer is self-contained and includes all four frontends, the .NET 10 runtime, Python and MarkItDown, native Tesseract OCR, English and Polish trained data, and LibreOffice:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1 -Version 1.0.0
 ```
 
-The script publishes all four .NET projects as framework-dependent executables, creates a portable Python runtime with `markitdown[all]`, downloads English and Polish Tesseract trained-data models, copies a complete LibreOffice runtime, and compiles `artifacts\installer\DOC2MD-<version>-win-x64-Setup.exe` with Inno Setup. Pass `-LibreOfficePath` when LibreOffice is not installed in its standard `Program Files` location, and `-IsccPath` when `ISCC.exe` is not discoverable automatically.
+The output is `artifacts\installer\DOC2MD-<version>-win-x64-Setup.exe`.
 
-The installer contains the Python runtime and libraries, both OCR models, LibreOffice, and the native/managed libraries produced by `dotnet publish`. It does not contain or install .NET. Install the .NET 8 Desktop Runtime (which also supplies the base .NET runtime) and the ASP.NET Core 8 Runtime if the API executable will be used.
+### macOS
 
-Installed entry points are `DOC2MD.Gui.exe`, `DOC2MD.Cli.exe`, `DOC2MD.Api.exe`, and `DOC2MD.Mcp.exe`. The installer adds a Start menu shortcut for the GUI and can optionally add the install directory to the current user's `PATH`.
+DOC2MD requires macOS 14 or newer. Install LibreOffice in `/Applications` before running the DOC2MD installer. The package preinstall check stops with an error when LibreOffice is absent.
 
-Every push to `main` or `master` runs `.github\workflows\publish-installer.yml`. The workflow assigns version `1.0.<run-number>`, builds and verifies the complete installer, creates SHA-256 checksums, and publishes versioned plus stable-name assets in a non-draft GitHub Release tagged `v1.0.<run-number>`. The stable `DOC2MD-win-x64-Setup.exe` and `DOC2MD-win-x64-Setup.exe.sha256` aliases support dependent installers through GitHub's `releases/latest/download` route. Re-running the same workflow run updates all existing release assets without assigning a different version.
+Build the installer on a machine matching the target architecture:
 
-## MarkItDown on Windows without Docker
-
-MarkItDown does not require Docker for local Windows use. The upstream README says it requires Python 3.10 or newer and can be installed with `pip install 'markitdown[all]'` or from source with `pip install -e 'packages/markitdown[all]'`. This wrapper uses that path instead of Docker.
-
-Initialize the local virtual environment:
-
-```powershell
-dotnet run --project .\src\DOC2MD.Cli -- install-markitdown --json
+```bash
+brew install tesseract dylibbundler
+brew install --cask libreoffice
+./installer/Build-MacInstaller.sh --version 1.0.0 --runtime osx-arm64
 ```
 
-The CLI then resolves MarkItDown in this order:
+Use `osx-x64` on an Intel Mac. The output is `artifacts/installer/DOC2MD-<version>-<runtime>.pkg`. It installs:
 
-1. `DOC2MD_MARKITDOWN_COMMAND`
-2. `.markitdown-venv\Scripts\python.exe`
-3. `markitdown` on `PATH`
-4. `python -m markitdown` with `PYTHONPATH` pointed at `lib\packages\markitdown\src`
+- `/Applications/DOC2MD.app`
+- `/usr/local/bin/doc2md`
+- `/usr/local/bin/doc2md-api`
+- `/usr/local/bin/doc2md-mcp`
 
-## CLI
+Opening `DOC2MD.app` starts the Avalonia GUI. The bundle also contains the CLI, API, and MCP executables. Python, MarkItDown, tessdata, Tesseract and its native dylibs, documentation, and supporting files are stored under `DOC2MD.app/Contents/Resources`.
+
+For signed distribution, set `DOC2MD_CODESIGN_IDENTITY` and `DOC2MD_INSTALLER_SIGN_IDENTITY` while building. Public packages should also be submitted to Apple's notarization service.
+
+## Commands
+
+Start the desktop GUI from a development checkout:
+
+```bash
+dotnet run --project src/DOC2MD.Gui
+```
+
+Check runtime discovery:
+
+```bash
+doc2md check-dependencies --json
+```
 
 Convert one file:
 
-```powershell
-dotnet run --project .\src\DOC2MD.Cli -- convert --input C:\Docs\file.pdf --output C:\Docs\file.md --overwrite
+```bash
+doc2md convert --input /path/to/file.pdf --output /path/to/file.md --overwrite
 ```
 
-Convert a folder, writing `.md` files beside source documents:
+Convert a folder, writing Markdown beside each source file:
 
-```powershell
-dotnet run --project .\src\DOC2MD.Cli -- convert-folder --input C:\Docs --recursive --overwrite --continue-on-error
+```bash
+doc2md convert-folder --input /path/to/documents --recursive --overwrite --continue-on-error
 ```
 
-Both commands write each result through an ASCII-only temporary file in the
-destination folder and move it to the requested `.md` path only after that
-document succeeds. A failed item removes only its own temporary output;
-successful outputs from the same folder conversion remain available.
+Start the HTTP API or MCP server from an installed macOS bundle with `doc2md-api` and `doc2md-mcp`. During development, use:
 
-Folder conversion is intentionally limited to typical document files. DOC2MD currently scans only these extensions:
+```bash
+dotnet run --project src/DOC2MD.Api
+dotnet run --project src/DOC2MD.Mcp
+```
 
-| Category | Extensions |
-| --- | --- |
-| PDF | `.pdf` |
-| Word processing | `.doc`, `.docx`, `.docm`, `.rtf`, `.odt` |
-| Spreadsheets | `.xls`, `.xlsx`, `.xlsm`, `.ods`, `.csv` |
-| Presentations | `.ppt`, `.pptx`, `.pptm`, `.odp` |
-| Text | `.txt`, `.text` |
-| Web documents | `.html`, `.htm` |
-| E-books | `.epub` |
+All three secondary frontends resolve a sibling CLI automatically. Set `DOC2MD_CLI_PATH` only when deploying a frontend separately from the CLI.
 
-The folder scanner skips Markdown output/source files (`.md`, `.markdown`) and configuration/data/code/media/archive formats such as `.json`, `.xml`, `.jpg`, `.png`, `.mp3`, `.wav`, `.zip`, `.msg`, and `.ipynb`.
+Supported extensions are `.pdf`, `.doc`, `.docx`, `.docm`, `.xlsx`, `.xls`, `.xlsm`, `.pptx`, `.ppt`, `.pptm`, `.rtf`, `.odt`, `.ods`, `.odp`, `.txt`, `.text`, `.csv`, `.html`, `.htm`, and `.epub`.
 
-Legacy Office, macro-enabled Office, RTF, and OpenDocument files are modernized before Markdown conversion:
+Legacy, macro-enabled, RTF, and OpenDocument inputs are modernized with headless LibreOffice before MarkItDown conversion:
 
-| Source extensions | Modernized side-by-side file |
+| Source | Modernized output |
 | --- | --- |
 | `.doc`, `.docm`, `.rtf`, `.odt` | `.docx` |
 | `.xls`, `.xlsm`, `.ods` | `.xlsx` |
 | `.ppt`, `.pptm`, `.odp` | `.pptx` |
 
-DOC2MD uses LibreOffice headless as the default modernization prerequisite. It looks for the runtime bundled by the Windows installer, `soffice.exe` on `PATH`, the usual `Program Files\LibreOffice\program` locations, or `DOC2MD_SOFFICE_PATH`. `DOC2MD_SOFFICE_PATH` can point either to `soffice.exe` or to the LibreOffice installation root.
+## Application resources
 
-If LibreOffice is present, DOC2MD first saves the old-format document beside the source in the modern format and then converts the modernized copy to Markdown. If the modernized file already exists beside the source, DOC2MD reuses it instead of overwriting it.
+Runtime discovery uses a platform-neutral resource root. It does not search parent folders for a repository checkout.
 
-If LibreOffice is not present, DOC2MD reports a warning for each old-format file and skips those files. The rest of the folder conversion continues.
+The normal layouts are:
 
-## PDF processing
+- Windows: `<install>/Resources`
+- macOS: `DOC2MD.app/Contents/Resources`
+- Development build: `<output>/Resources`
 
-PDFs default to local processing:
+Set `DOC2MD_RESOURCE_ROOT` to override the complete resource root. Its relevant children are:
 
-1. PdfPig inspects every page for extractable text.
-2. If every page has enough extractable text, the CLI keeps the existing MarkItDown conversion path.
-3. If any page lacks extractable text, the CLI writes one Markdown file in page order. Text pages are extracted with PdfPig and image-only pages are rendered with PDFtoImage/PDFium and OCRed with Tesseract.
-
-The default OCR language setting is `eng+pol`.
-
-Local OCR needs Tesseract trained data. Put `eng.traineddata` and/or `pol.traineddata` in one of these locations:
-
-- `.\tessdata`
-- `%ProgramFiles%\Tesseract-OCR\tessdata`
-- a custom folder passed with `--tessdata` or `DOC2MD_TESSDATA_PATH`
-
-Use Azure AI Document Intelligence Layout instead:
-
-```powershell
-$env:DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY = "<key>"
-dotnet run --project .\src\DOC2MD.Cli -- configure-azure `
-  --endpoint https://<resource>.cognitiveservices.azure.com/ `
-  --tier s0
-Remove-Item Env:\DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY
-
-dotnet run --project .\src\DOC2MD.Cli -- convert `
-  --input C:\Docs\scan.pdf `
-  --output C:\Docs\scan.md `
-  --pdf-processing azure `
-  --overwrite
+```text
+Resources/
+  markitdown/
+    pyproject.toml
+    src/
+  python/
+  tessdata/
+    eng.traineddata
+    pol.traineddata
+  tesseract/
 ```
 
-`configure-azure` protects the key with Windows DPAPI for the current user and stores it outside the repository in `%APPDATA%\DOC2MD\settings.json`. The CLI, GUI, API, and MCP wrappers all call the CLI, so they can use the configured key without putting it on the command line. A key can still be supplied with `--azure-document-intelligence-key` or `DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY` when needed, but the wrappers avoid forwarding request keys as CLI arguments.
+## MarkItDown and Python
 
-Use raw MarkItDown PDF handling:
+MarkItDown requires Python 3.10 or newer. DOC2MD resolves it in this order:
 
-```powershell
-dotnet run --project .\src\DOC2MD.Cli -- convert --input C:\Docs\file.pdf --output C:\Docs\file.md --pdf-processing markitdown
+1. `DOC2MD_MARKITDOWN_COMMAND`
+2. bundled Python below the resource root
+3. the per-user virtual environment created by `install-markitdown`
+4. `markitdown` on `PATH`
+5. `python3` or `python` with `PYTHONPATH` set to `Resources/markitdown/src`
+
+Create the per-user fallback environment when running a development build without packaged Python:
+
+```bash
+dotnet run --project src/DOC2MD.Cli -- install-markitdown --python python3 --json
 ```
 
-Only one PDF stack can be selected per conversion. The CLI rejects Azure options unless `--pdf-processing azure` is selected, and rejects local OCR options unless `--pdf-processing local` is selected.
+The environment is stored in the user's DOC2MD application-data directory, not in the repository or installed application bundle.
 
-### PDF size and page limits
+## PDF processing and OCR
 
-Azure AI Document Intelligence limits are service limits. Microsoft documents the current v4.0 limits in [Service quotas and limits](https://learn.microsoft.com/azure/ai-services/document-intelligence/service-limits?view=doc-intel-4.0.0) and [Layout model input requirements](https://learn.microsoft.com/azure/ai-services/document-intelligence/prebuilt/layout?view=doc-intel-4.0.0#input-requirements):
+Local PDF processing is the default:
 
-| Processing stack | Hard limits | DOC2MD default behavior |
-| --- | --- | --- |
-| Azure Document Intelligence S0 | 500 MB per document, 2,000 PDF/TIFF pages, image dimensions from 50 x 50 to 10,000 x 10,000 pixels. | Splits PDFs into parts of at most 100 pages and 100 MB, analyzes each part, then merges the Markdown in source page order. |
-| Azure Document Intelligence F0 | 4 MB per document, only the first 2 pages are processed. | Select with `--azure-document-intelligence-tier f0`; DOC2MD splits to at most 2 pages and 3 MB per part. Be aware each part is still subject to F0 billing/allowance behavior. |
-| Local PdfPig/PDFtoImage/Tesseract | No fixed cloud-service file-size or page-count limit. Practical limits are local RAM, disk, PDF complexity, page dimensions, render DPI, and installed Tesseract trained data. | Processes OCR one page at a time from the PDF path instead of loading the whole PDF into memory. Large local PDFs are batched by page for merged Markdown output; default batch size is 100 pages. |
-| MarkItDown fallback | No DOC2MD-specific hard limit. Limits depend on MarkItDown, Python packages, file type, and local resources. | Used for non-PDF files and for PDFs where local inspection finds all pages already extractable. |
+1. PdfPig checks every page for extractable text.
+2. Fully extractable PDFs are converted with MarkItDown.
+3. Image-only pages are rendered with PDFium and recognized by the packaged native Tesseract executable.
 
-When Azure splitting is enabled, DOC2MD creates temporary page-range PDFs, sends each part to Document Intelligence Layout, and writes one final Markdown file. The final Markdown includes comments showing which original source pages each split part came from. Temporary split files are deleted after conversion.
+The default OCR languages are `eng+pol`. Override the native executable with `DOC2MD_TESSERACT_PATH` and trained data with `--tessdata` or `DOC2MD_TESSDATA_PATH`.
 
-Useful PDF options:
+Useful options include:
 
 - `--pdf-processing local|azure|markitdown`
 - `--ocr-languages eng+pol`
-- `--tessdata C:\Path\To\tessdata`
+- `--tessdata <folder>`
 - `--pdf-text-threshold 40`
 - `--pdf-render-dpi 300`
-- `--pdf-splitting always`
 - `--pdf-max-pages-per-part 100`
 - `--pdf-max-part-size-mb 100`
-- `--azure-document-intelligence-endpoint <url>`
-- `--azure-document-intelligence-key <key>` (prefer `configure-azure` for local Windows use)
-- `--azure-document-intelligence-locale <locale>`
-- `--azure-document-intelligence-tier f0|s0`
 
-Environment equivalents:
+## Azure Document Intelligence
 
-- `DOC2MD_PDF_PROCESSING`
-- `DOC2MD_OCR_LANGUAGES`
-- `DOC2MD_TESSDATA_PATH`
-- `DOC2MD_PDF_TEXT_THRESHOLD`
-- `DOC2MD_PDF_RENDER_DPI`
-- `DOC2MD_PDF_SPLITTING`
-- `DOC2MD_PDF_MAX_PAGES_PER_PART`
-- `DOC2MD_PDF_MAX_PART_SIZE_MB`
-- `DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`
-- `DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY`
-- `DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_LOCALE`
-- `DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_TIER`
+Configure Azure Layout processing:
 
-## API
-
-Run locally:
-
-```powershell
-dotnet run --project .\src\DOC2MD.Api
+```bash
+export DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY='<key>'
+doc2md configure-azure \
+  --endpoint 'https://<resource>.cognitiveservices.azure.com/' \
+  --tier s0 \
+  --json
+unset DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY
 ```
 
-Endpoints:
+The API key is protected with Windows DPAPI on Windows and the current user's Keychain on macOS. Only a protected reference is stored in the JSON settings file. Environment variables remain authoritative for automation.
 
-- `GET /health`
-- `POST /convert` with `{ "inputPath": "...", "outputPath": "...", "overwrite": true }`
-- `POST /convert-folder` with `{ "inputFolder": "...", "recursive": true, "overwrite": true, "continueOnError": true }`
+## Development
 
-Both conversion endpoints also accept the optional PDF fields `pdfProcessing`, `ocrLanguages`, `tessdataPath`, `pdfTextThreshold`, `pdfRenderDpi`, `pdfSplitting`, `pdfMaxPagesPerPart`, `pdfMaxPartSizeMb`, `azureDocumentIntelligenceEndpoint`, `azureDocumentIntelligenceKey`, `azureDocumentIntelligenceLocale`, and `azureDocumentIntelligenceTier`.
+Install the .NET 10 SDK, then build and test the complete solution on Windows or macOS:
 
-For IIS, publish `DOC2MD.Api` and set `DOC2MD_CLI_PATH` to the published or built `DOC2MD.Cli.exe`.
-
-## MCP
-
-Run the MCP server over stdio:
-
-```powershell
-dotnet run --project .\src\DOC2MD.Mcp
+```bash
+dotnet build DOC2MD.slnx --configuration Release
+dotnet test DOC2MD.slnx --configuration Release
 ```
 
-Tools:
+The ordinary test command runs fast unit tests and reports the external-runtime sample tests as skipped. Run the three real sample conversions explicitly after installing LibreOffice, Python/MarkItDown, and Tesseract:
 
-- `convert_document`
-- `convert_folder`
+```bash
+DOC2MD_RUN_SAMPLE_TESTS=1 \
+  dotnet test tests/DOC2MD.Integration.Tests/DOC2MD.Integration.Tests.csproj --configuration Release
+```
 
-Both tools accept the same optional PDF settings as the API.
+Set `DOC2MD_SAMPLE_TEST_CLI` and `DOC2MD_SAMPLE_TEST_TESSDATA` to test an installer-staged CLI and OCR models. Release CI sets both variables and validates `example-cv.docx`, `examples-download.pdf`, and `example-ebook.pdf` against the packaged application.
 
-Set `DOC2MD_CLI_PATH` if the MCP server cannot discover the CLI executable.
+Release CI builds and smoke-tests the complete Windows x64, macOS Apple Silicon, and macOS Intel installers before attaching them to the same GitHub release.

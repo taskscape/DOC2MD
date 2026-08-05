@@ -182,50 +182,49 @@ static async Task<JsonObject> CallToolAsync(JsonNode? parameters)
 
 // Build one-file conversion arguments. Required values are checked here so the MCP caller receives
 // a tool error before a child process is started.
-static string BuildConvertArguments(JsonObject arguments)
+static IReadOnlyList<string> BuildConvertArguments(JsonObject arguments)
 {
     var inputPath = Required(arguments, "inputPath");
     var outputPath = Required(arguments, "outputPath");
-    var cliArgs = $"convert --input {Quote(inputPath)} --output {Quote(outputPath)} --json";
+    var cliArgs = new List<string> { "convert", "--input", inputPath, "--output", outputPath, "--json" };
     if (Bool(arguments, "overwrite"))
     {
-        cliArgs += " --overwrite";
+        cliArgs.Add("--overwrite");
     }
 
-    cliArgs += BuildPdfOptions(arguments);
+    AppendPdfOptions(cliArgs, arguments);
     return cliArgs;
 }
 
 // Build folder conversion arguments. The CLI derives output paths from the input tree, so the MCP
 // contract intentionally requires only the source folder.
-static string BuildConvertFolderArguments(JsonObject arguments)
+static IReadOnlyList<string> BuildConvertFolderArguments(JsonObject arguments)
 {
     var inputFolder = Required(arguments, "inputFolder");
-    var cliArgs = $"convert-folder --input {Quote(inputFolder)} --json";
+    var cliArgs = new List<string> { "convert-folder", "--input", inputFolder, "--json" };
     if (Bool(arguments, "recursive"))
     {
-        cliArgs += " --recursive";
+        cliArgs.Add("--recursive");
     }
 
     if (Bool(arguments, "overwrite"))
     {
-        cliArgs += " --overwrite";
+        cliArgs.Add("--overwrite");
     }
 
     if (Bool(arguments, "continueOnError", defaultValue: true))
     {
-        cliArgs += " --continue-on-error";
+        cliArgs.Add("--continue-on-error");
     }
 
-    cliArgs += BuildPdfOptions(arguments);
+    AppendPdfOptions(cliArgs, arguments);
     return cliArgs;
 }
 
 // Forward only explicitly supplied PDF options. Cross-option compatibility is deliberately checked
 // by the CLI so API, GUI, and MCP callers all follow one policy.
-static string BuildPdfOptions(JsonObject arguments)
+static void AppendPdfOptions(List<string> cliArgs, JsonObject arguments)
 {
-    var cliArgs = new StringBuilder();
     AppendOption(cliArgs, "--pdf-processing", String(arguments, "pdfProcessing"));
     AppendOption(cliArgs, "--ocr-languages", String(arguments, "ocrLanguages"));
     AppendOption(cliArgs, "--tessdata", String(arguments, "tessdataPath"));
@@ -237,15 +236,15 @@ static string BuildPdfOptions(JsonObject arguments)
     AppendOption(cliArgs, "--azure-document-intelligence-endpoint", String(arguments, "azureDocumentIntelligenceEndpoint"));
     AppendOption(cliArgs, "--azure-document-intelligence-locale", String(arguments, "azureDocumentIntelligenceLocale"));
     AppendOption(cliArgs, "--azure-document-intelligence-tier", String(arguments, "azureDocumentIntelligenceTier"));
-    return cliArgs.ToString();
 }
 
-// Append one optional CLI switch while preserving the leading-space convention used by callers.
-static void AppendOption(StringBuilder cliArgs, string name, string? value)
+// Append one optional CLI switch as a distinct process argument.
+static void AppendOption(List<string> cliArgs, string name, string? value)
 {
     if (!string.IsNullOrWhiteSpace(value))
     {
-        cliArgs.Append(' ').Append(name).Append(' ').Append(Quote(value));
+        cliArgs.Add(name);
+        cliArgs.Add(value);
     }
 }
 
@@ -272,24 +271,20 @@ static async Task WriteAsync(JsonObject message)
     await Console.Out.FlushAsync();
 }
 
-// Quote one process argument using the escaping convention shared by the other front ends.
-static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
-
 internal static class CliRunner
 {
     /// <summary>
     /// Executes the DOC2MD CLI and captures its complete output for an MCP tool response.
     /// </summary>
-    /// <param name="arguments">The already quoted command-line argument string.</param>
+    /// <param name="arguments">The individual command-line arguments.</param>
     /// <param name="azureDocumentIntelligenceKey">An optional Azure key passed through the child environment.</param>
     /// <returns>The child process exit code and captured standard streams.</returns>
-    public static async Task<CliResult> RunAsync(string arguments, string? azureDocumentIntelligenceKey)
+    public static async Task<CliResult> RunAsync(IReadOnlyList<string> arguments, string? azureDocumentIntelligenceKey)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
         {
-            FileName = ResolveCliPath(),
-            Arguments = arguments,
+            FileName = CliExecutableLocator.Resolve(),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -298,6 +293,11 @@ internal static class CliRunner
             StandardErrorEncoding = Encoding.UTF8
         };
 
+        foreach (var argument in arguments)
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
+
         if (!string.IsNullOrWhiteSpace(azureDocumentIntelligenceKey))
         {
             // Keep credentials out of the command line, which can be visible to other local users.
@@ -305,44 +305,12 @@ internal static class CliRunner
         }
 
         process.Start();
-        // MCP conversions are expected to keep stderr small enough that reading stdout first does
-        // not fill the secondary pipe; changing the established process contract is out of scope here.
-        var stdout = await process.StandardOutput.ReadToEndAsync();
-        var stderr = await process.StandardError.ReadToEndAsync();
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
-        return new CliResult(process.ExitCode, stdout, stderr);
+        return new CliResult(process.ExitCode, await stdoutTask, await stderrTask);
     }
 
-    /// <summary>
-    /// Resolves the DOC2MD CLI executable used by the MCP server.
-    /// </summary>
-    /// <returns>The configured CLI path, a development-build path, or the executable name for normal OS lookup.</returns>
-    private static string ResolveCliPath()
-    {
-        var configured = Environment.GetEnvironmentVariable("DOC2MD_CLI_PATH");
-        if (!string.IsNullOrWhiteSpace(configured))
-        {
-            // Packaged deployments may keep the CLI outside the MCP server directory and opt in
-            // through an explicit path without relying on the process working directory.
-            return configured;
-        }
-
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
-        while (current is not null)
-        {
-            // The upward search supports running the MCP project directly from any repository
-            // subdirectory while preserving the CLI's standard Debug output location.
-            var candidate = Path.Combine(current.FullName, "src", "DOC2MD.Cli", "bin", "Debug", "net8.0", "DOC2MD.Cli.exe");
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            current = current.Parent;
-        }
-
-        return "DOC2MD.Cli.exe";
-    }
 }
 
 internal sealed record CliResult(int ExitCode, string Stdout, string Stderr);

@@ -2,9 +2,14 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;osx-arm64;osx-x64</RuntimeIdentifiers>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\DOC2MD.Frontends\CliExecutableLocator.cs" Link="CliExecutableLocator.cs" />
+  </ItemGroup>
 
 </Project>

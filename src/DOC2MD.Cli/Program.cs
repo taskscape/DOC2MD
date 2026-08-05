@@ -67,12 +67,19 @@ internal static class Cli
         var json = Has(args, "--json");
         try
         {
+            if (args[0].Equals("convert", StringComparison.OrdinalIgnoreCase)
+                || args[0].Equals("convert-folder", StringComparison.OrdinalIgnoreCase))
+            {
+                await RequireLibreOfficeAsync();
+            }
+
             return args[0].ToLowerInvariant() switch
             {
                 "convert" => await ConvertFileAsync(args, json),
                 "convert-folder" => await ConvertFolderAsync(args, json),
                 "configure-azure" => ConfigureAzure(args, json),
                 "install-markitdown" => await InstallMarkItDownAsync(args, json),
+                "check-dependencies" => await CheckDependenciesAsync(json),
                 _ => Fail($"Unknown command '{args[0]}'.", json)
             };
         }
@@ -88,11 +95,11 @@ internal static class Cli
     /// </summary>
     /// <param name="args">Arguments containing the input, output, overwrite, and PDF options.</param>
     /// <param name="json">Whether to format the result as indented JSON.</param>
-    /// <returns>The converter exit code, or zero when a missing optional legacy dependency causes a documented skip.</returns>
+    /// <returns>The converter exit code.</returns>
     private static async Task<int> ConvertFileAsync(string[] args, bool json)
     {
-        var input = Required(args, "--input");
-        var output = Required(args, "--output");
+        var input = Path.GetFullPath(Required(args, "--input"));
+        var output = Path.GetFullPath(Required(args, "--output"));
         var overwrite = Has(args, "--overwrite");
         var conversionOptions = PdfConversionOptions.FromArgs(args);
 
@@ -115,7 +122,7 @@ internal static class Cli
         var prepared = await PrepareInputForConversionAsync(input);
         if (prepared.Skipped)
         {
-            // Missing LibreOffice is a non-fatal capability gap so callers can continue processing other file types.
+            // Retain a structured per-file result if LibreOffice disappears after the command-level dependency check.
             WriteResult(json, new
             {
                 succeeded = false,
@@ -158,7 +165,7 @@ internal static class Cli
     /// <returns>Zero when all attempted conversions succeed; otherwise one.</returns>
     private static async Task<int> ConvertFolderAsync(string[] args, bool json)
     {
-        var inputFolder = Required(args, "--input");
+        var inputFolder = Path.GetFullPath(Required(args, "--input"));
         var recursive = Has(args, "--recursive");
         var overwrite = Has(args, "--overwrite");
         var continueOnError = Has(args, "--continue-on-error");
@@ -276,25 +283,38 @@ internal static class Cli
     /// <returns>The failing subprocess exit code, or zero after a successful installation.</returns>
     private static async Task<int> InstallMarkItDownAsync(string[] args, bool json)
     {
-        var python = Value(args, "--python") ?? "python";
-        var root = FindRepoRoot();
-        var packagePath = Path.Combine(root, "lib", "packages", "markitdown");
+        var python = Value(args, "--python") ?? ResolvePythonForEnvironmentCreation();
+        var root = ApplicationPaths.ResourceRoot;
+        var packagePath = ApplicationPaths.MarkItDownPackageRoot;
         if (!Directory.Exists(packagePath))
         {
             throw new DirectoryNotFoundException($"MarkItDown source package was not found: {packagePath}");
         }
 
-        // Keeping the environment under the repository makes CLI resolution deterministic and avoids global Python changes.
-        var venv = Path.Combine(root, ".markitdown-venv");
-        var create = await RunProcessAsync(python, $"-m venv {Quote(venv)}", root);
+        var version = await RunProcessAsync(
+            python,
+            ["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            root);
+        if (version.ExitCode != 0 || !IsSupportedPythonVersion(version.stdout))
+        {
+            throw new InvalidOperationException(
+                $"MarkItDown requires Python 3.10 or newer. Could not use '{python}'. {version.stderr.Trim()}");
+        }
+
+        var venv = ApplicationPaths.UserMarkItDownVenvRoot;
+        Directory.CreateDirectory(ApplicationPaths.UserRuntimeRoot);
+        var create = await RunProcessAsync(python, ["-m", "venv", venv], root);
         if (create.ExitCode != 0)
         {
             WriteResult(json, new { succeeded = false, step = "venv", exitCode = create.ExitCode, create.stderr });
             return create.ExitCode;
         }
 
-        var venvPython = Path.Combine(venv, "Scripts", "python.exe");
-        var install = await RunProcessAsync(venvPython, $"-m pip install -e {Quote(packagePath + "[all]")}", root);
+        var venvPython = ApplicationPaths.GetVirtualEnvironmentPython(venv);
+        var install = await RunProcessAsync(
+            venvPython,
+            ["-m", "pip", "install", "-e", packagePath + "[all]"],
+            root);
         WriteResult(json, new
         {
             succeeded = install.ExitCode == 0,
@@ -364,7 +384,7 @@ internal static class Cli
             pdfProcessing = useAzureByDefault ? "azure" : "unchanged",
             endpoint,
             tier = tier.ToLowerInvariant(),
-            key = "stored-with-windows-dpapi",
+            key = $"stored-with-{Doc2MdConfiguration.SecretStorageDescription}",
             settingsPath = Doc2MdConfiguration.SettingsPath
         });
         return 0;
@@ -451,12 +471,12 @@ internal static class Cli
     /// <returns>A success result, or a skipped result when LibreOffice cannot be started.</returns>
     private static async Task<ModernizationResult> ModernizeWithLibreOfficeAsync(string input, string modernizedPath, string targetExtension)
     {
-        var soffice = ResolveSofficePath();
+        var soffice = ResolveLibreOfficePath();
         var sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(input)) ?? Directory.GetCurrentDirectory();
         var targetFormat = targetExtension.TrimStart('.');
         var result = await RunProcessAsync(
             soffice,
-            $"--headless --convert-to {targetFormat} --outdir {Quote(sourceDirectory)} {Quote(input)}",
+            ["--headless", "--convert-to", targetFormat, "--outdir", sourceDirectory, input],
             sourceDirectory);
 
         if (result.ExitCode == -1)
@@ -464,7 +484,7 @@ internal static class Cli
             // RunProcessAsync reserves -1 for process-discovery failures, which are optional for non-legacy inputs.
             return ModernizationResult.Skipped(
                 $"LibreOffice is not available, so '{input}' was not modernized to {targetExtension} and was skipped. " +
-                "Install LibreOffice or set DOC2MD_SOFFICE_PATH to soffice.exe to enable legacy document conversion.");
+                "Install LibreOffice or set DOC2MD_SOFFICE_PATH to its soffice executable.");
         }
 
         if (result.ExitCode != 0 || !File.Exists(modernizedPath))
@@ -472,57 +492,55 @@ internal static class Cli
             var stderr = string.IsNullOrWhiteSpace(result.stderr) ? "No stderr was returned." : result.stderr.Trim();
             throw new InvalidOperationException(
                 $"LibreOffice could not modernize '{input}' to '{modernizedPath}'. " +
-                $"Install LibreOffice or set DOC2MD_SOFFICE_PATH to soffice.exe. {stderr}");
+                $"Install LibreOffice or set DOC2MD_SOFFICE_PATH to its soffice executable. {stderr}");
         }
 
         return ModernizationResult.Success();
     }
 
     /// <summary>
-    /// Resolves LibreOffice from explicit configuration, the installer payload, or conventional Windows locations.
+    /// Resolves LibreOffice from explicit configuration, the Windows payload, or conventional platform locations.
     /// </summary>
-    /// <returns>An executable path when discovered, or the PATH command name for a final launch attempt.</returns>
-    private static string ResolveSofficePath()
+    /// <returns>The discovered LibreOffice executable path.</returns>
+    private static string ResolveLibreOfficePath()
     {
-        // Explicit configuration is authoritative even when it is not currently resolvable, preserving caller intent and diagnostics.
-        var configured = Environment.GetEnvironmentVariable("DOC2MD_SOFFICE_PATH")
-            ?? Environment.GetEnvironmentVariable("DOC2MD_LIBREOFFICE_PATH");
-        if (!string.IsNullOrWhiteSpace(configured))
+        return ApplicationPaths.LibreOfficeExecutableCandidates().FirstOrDefault(File.Exists)
+            ?? throw new FileNotFoundException(
+                "LibreOffice is required by DOC2MD but was not detected. Install LibreOffice or set " +
+                "DOC2MD_SOFFICE_PATH to the soffice executable or LibreOffice installation root.");
+    }
+
+    private static async Task<string> RequireLibreOfficeAsync()
+    {
+        var executable = ResolveLibreOfficePath();
+        var result = await RunProcessAsync(executable, ["--headless", "--version"], ApplicationPaths.ResourceRoot);
+        if (result.ExitCode != 0)
         {
-            if (File.Exists(configured))
-            {
-                return configured;
-            }
-
-            var configuredDirectoryCandidate = Path.Combine(configured, "program", "soffice.exe");
-            if (File.Exists(configuredDirectoryCandidate))
-            {
-                return configuredDirectoryCandidate;
-            }
-
-            return configured;
+            var detail = string.IsNullOrWhiteSpace(result.stderr) ? result.stdout : result.stderr;
+            throw new InvalidOperationException(
+                $"LibreOffice was detected at '{executable}' but could not start. {detail.Trim()}");
         }
 
-        var candidates = new[]
-        {
-            Path.Combine(FindRepoRoot(), "runtime", "libreoffice", "program", "soffice.exe"),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
-        }
-        .Where(path => !string.IsNullOrWhiteSpace(path))
-        .Select(path => path.EndsWith("soffice.exe", StringComparison.OrdinalIgnoreCase)
-            ? path
-            : Path.Combine(path, "LibreOffice", "program", "soffice.exe"));
+        return executable;
+    }
 
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-        }
+    private static async Task<int> CheckDependenciesAsync(bool json)
+    {
+        var libreOffice = await RequireLibreOfficeAsync();
+        var python = ResolveAvailablePython();
+        var tesseract = ApplicationPaths.TesseractExecutableCandidates().FirstOrDefault(File.Exists);
 
-        return "soffice";
+        WriteResult(json, new
+        {
+            succeeded = true,
+            resourceRoot = ApplicationPaths.ResourceRoot,
+            libreOffice,
+            python,
+            tesseract,
+            markItDownSource = ApplicationPaths.MarkItDownSourceRoot,
+            tessdata = ApplicationPaths.BundledTessdataRoot
+        });
+        return 0;
     }
 
     /// <summary>
@@ -533,28 +551,46 @@ internal static class Cli
     /// <returns>The child-process exit code and captured output streams.</returns>
     private static async Task<(int ExitCode, string stdout, string stderr)> RunMarkItDownAsync(string input, string output)
     {
-        // Resolution favors explicit and repository-local runtimes so installed builds do not depend on global Python state.
-        var root = FindRepoRoot();
+        // Resolution favors explicit and application-bundled runtimes so installed builds do not depend on global Python state.
+        var root = ApplicationPaths.ResourceRoot;
         var configured = Environment.GetEnvironmentVariable("DOC2MD_MARKITDOWN_COMMAND");
         if (!string.IsNullOrWhiteSpace(configured))
         {
-            var result = await RunProcessAsync(configured, $"{Quote(input)} -o {Quote(output)}", root);
+            var result = await RunProcessAsync(configured, [input, "-o", output], root);
             return FilterBenignMarkItDownWarnings(input, result);
         }
 
-        var venvPython = Path.Combine(root, ".markitdown-venv", "Scripts", "python.exe");
-        if (File.Exists(venvPython))
+        foreach (var bundledPython in ApplicationPaths.BundledPythonCandidates().Where(File.Exists))
         {
-            return await RunPythonMarkItDownAsync(venvPython, input, output, root);
+            var result = await RunPythonMarkItDownAsync(bundledPython, input, output, root);
+            if (result.ExitCode != -1)
+            {
+                return result;
+            }
         }
 
-        var pathResult = await RunProcessAsync("markitdown", $"{Quote(input)} -o {Quote(output)}", root);
+        var userVenvPython = ApplicationPaths.GetVirtualEnvironmentPython(ApplicationPaths.UserMarkItDownVenvRoot);
+        if (File.Exists(userVenvPython))
+        {
+            return await RunPythonMarkItDownAsync(userVenvPython, input, output, root);
+        }
+
+        var pathResult = await RunProcessAsync("markitdown", [input, "-o", output], root);
         if (pathResult.ExitCode != -1)
         {
             return FilterBenignMarkItDownWarnings(input, pathResult);
         }
 
-        return await RunPythonMarkItDownAsync("python", input, output, root);
+        foreach (var python in SystemPythonCandidates())
+        {
+            var result = await RunPythonMarkItDownAsync(python, input, output, root);
+            if (result.ExitCode != -1)
+            {
+                return result;
+            }
+        }
+
+        return (-1, string.Empty, "Python 3.10 or newer with MarkItDown was not found. Reinstall DOC2MD or run install-markitdown.");
     }
 
     /// <summary>
@@ -569,11 +605,11 @@ internal static class Cli
     {
         // The installer retains vendored source at the same relative path used by development checkouts.
         var source = Environment.GetEnvironmentVariable("DOC2MD_MARKITDOWN_SOURCE")
-            ?? Path.Combine(root, "lib", "packages", "markitdown", "src");
+            ?? ApplicationPaths.MarkItDownSourceRoot;
 
         var result = await RunProcessAsync(
             python,
-            $"-m markitdown {Quote(input)} -o {Quote(output)}",
+            ["-m", "markitdown", input, "-o", output],
             root,
             new Dictionary<string, string?> { ["PYTHONPATH"] = source });
         return FilterBenignMarkItDownWarnings(input, result);
@@ -625,13 +661,13 @@ internal static class Cli
     /// Runs a child process without a shell and captures its UTF-8 output streams.
     /// </summary>
     /// <param name="fileName">The executable path or command name.</param>
-    /// <param name="arguments">The already-quoted command-line arguments.</param>
+    /// <param name="arguments">The individual command-line arguments.</param>
     /// <param name="workingDirectory">The child process working directory.</param>
     /// <param name="environment">Optional environment overrides.</param>
-    /// <returns>The process result; exit code -1 indicates that Windows could not start the executable.</returns>
+    /// <returns>The process result; exit code -1 indicates that the operating system could not start the executable.</returns>
     private static async Task<(int ExitCode, string stdout, string stderr)> RunProcessAsync(
         string fileName,
-        string arguments,
+        IReadOnlyList<string> arguments,
         string workingDirectory,
         IReadOnlyDictionary<string, string?>? environment = null)
     {
@@ -641,7 +677,6 @@ internal static class Cli
             process.StartInfo = new ProcessStartInfo
             {
                 FileName = fileName,
-                Arguments = arguments,
                 WorkingDirectory = workingDirectory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -650,6 +685,11 @@ internal static class Cli
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8
             };
+
+            foreach (var argument in arguments)
+            {
+                process.StartInfo.ArgumentList.Add(argument);
+            }
 
             if (environment is not null)
             {
@@ -672,25 +712,35 @@ internal static class Cli
         }
     }
 
-    /// <summary>
-    /// Finds the nearest ancestor containing the vendored MarkItDown source layout.
-    /// </summary>
-    /// <returns>The DOC2MD root, or the current directory when the layout cannot be discovered.</returns>
-    private static string FindRepoRoot()
+    private static string ResolvePythonForEnvironmentCreation() =>
+        ResolveAvailablePython()
+        ?? throw new FileNotFoundException("Python 3.10 or newer was not found. Set --python to a compatible Python executable.");
+
+    private static string? ResolveAvailablePython() =>
+        ApplicationPaths.BundledPythonCandidates()
+            .Concat(new[] { ApplicationPaths.GetVirtualEnvironmentPython(ApplicationPaths.UserMarkItDownVenvRoot) })
+            .Concat(SystemPythonCandidates().Select(candidate => ApplicationPaths.FindCommandOnPath(candidate) ?? candidate))
+            .FirstOrDefault(candidate => File.Exists(candidate) || ApplicationPaths.FindCommandOnPath(candidate) is not null);
+
+    private static IEnumerable<string> SystemPythonCandidates()
     {
-        // AppContext.BaseDirectory works for both build outputs and the flat installed payload.
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
-        while (current is not null)
+        if (OperatingSystem.IsWindows())
         {
-            if (Directory.Exists(Path.Combine(current.FullName, "lib", "packages", "markitdown", "src")))
-            {
-                return current.FullName;
-            }
-
-            current = current.Parent;
+            yield return "python";
+            yield return "py";
         }
+        else
+        {
+            yield return "python3";
+            yield return "python";
+        }
+    }
 
-        return Directory.GetCurrentDirectory();
+    private static bool IsSupportedPythonVersion(string versionText)
+    {
+        var version = versionText.Trim();
+        return Version.TryParse(version, out var parsed)
+            && (parsed.Major > 3 || parsed is { Major: 3, Minor: >= 10 });
     }
 
     /// <summary>
@@ -757,13 +807,6 @@ internal static class Cli
     }
 
     /// <summary>
-    /// Quotes a command-line value and escapes embedded quotation marks.
-    /// </summary>
-    /// <param name="value">The value to quote.</param>
-    /// <returns>The quoted value.</returns>
-    private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
-
-    /// <summary>
     /// Formats the supported extension set deterministically for diagnostics.
     /// </summary>
     /// <returns>A comma-separated extension list.</returns>
@@ -827,6 +870,7 @@ Commands:
   convert-folder --input <folder> [--recursive] [--overwrite] [--continue-on-error] [--json] [PDF options]
   configure-azure --endpoint <url> [--tier <f0|s0>] [--json]
   install-markitdown [--python <python-exe>] [--json]
+  check-dependencies [--json]
 
 Folder conversion document extensions:
   .pdf, .doc, .docx, .docm, .xls, .xlsx, .xlsm, .ppt, .pptx,
@@ -837,9 +881,9 @@ Legacy and OpenDocument modernization:
   .doc, .docm, .rtf, .odt -> .docx
   .xls, .xlsm, .ods       -> .xlsx
   .ppt, .pptm, .odp       -> .pptx
-  Uses LibreOffice headless by default. If soffice.exe is not present, these
-  old-format files are skipped with warnings and the batch continues.
-  Set DOC2MD_SOFFICE_PATH to a soffice.exe path or LibreOffice installation root.
+  LibreOffice is a required DOC2MD runtime dependency. Every conversion checks
+  that its headless executable can start before processing any input.
+  Set DOC2MD_SOFFICE_PATH to the soffice executable or LibreOffice installation root.
 
 PDF options:
   --pdf-processing <local|azure|markitdown>
@@ -861,8 +905,8 @@ PDF options:
 
 Secure Azure setup:
   configure-azure reads DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY when --key is not
-  supplied, protects it with Windows DPAPI for the current user, and stores it
-  outside the repository. The configured key is then used automatically.
+  supplied, protects it with Windows DPAPI or macOS Keychain for the current
+  user, and stores only the protected reference in DOC2MD settings.
 
 Environment equivalents:
   DOC2MD_PDF_PROCESSING, DOC2MD_OCR_LANGUAGES, DOC2MD_TESSDATA_PATH,
@@ -871,13 +915,16 @@ Environment equivalents:
   DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT,
   DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY,
   DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_LOCALE,
-  DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_TIER
+  DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_TIER, DOC2MD_RESOURCE_ROOT,
+  DOC2MD_MARKITDOWN_COMMAND, DOC2MD_MARKITDOWN_SOURCE,
+  DOC2MD_TESSERACT_PATH, DOC2MD_SOFFICE_PATH
 
-MarkItDown resolution on Windows:
+MarkItDown resolution:
   1. DOC2MD_MARKITDOWN_COMMAND, if set
-  2. .markitdown-venv\Scripts\python.exe created by install-markitdown
-  3. markitdown on PATH
-  4. python -m markitdown with PYTHONPATH pointed at lib\packages\markitdown\src
+  2. bundled Python below the platform-neutral DOC2MD resource root
+  3. the per-user virtual environment created by install-markitdown
+  4. markitdown on PATH
+  5. python3/python -m markitdown with PYTHONPATH set to Resources/markitdown/src
 """);
     }
 }

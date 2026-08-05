@@ -7,5 +7,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DOC2MD.Cli.Tests/DOC2MD.Cli.Tests.csproj" />
+    <Project Path="tests/DOC2MD.Integration.Tests/DOC2MD.Integration.Tests.csproj" />
   </Folder>
 </Solution>

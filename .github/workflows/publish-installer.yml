@@ -1,208 +1,151 @@
-name: Build and publish DOC2MD installer
+name: Build and publish DOC2MD installers
 
 on:
   push:
     branches:
       - main
       - master
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build and publish Windows installer
-    runs-on: windows-2025
-    timeout-minutes: 60
-
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Check out the release revision
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+      - id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if (( GITHUB_RUN_NUMBER < 1 || GITHUB_RUN_NUMBER > 65534 )); then
+            echo "Workflow run number cannot be represented as a .NET version component: $GITHUB_RUN_NUMBER" >&2
+            exit 1
+          fi
+          version="1.0.$GITHUB_RUN_NUMBER"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
-      - name: Install the .NET 8 SDK
-        uses: actions/setup-dotnet@v5
+  windows:
+    name: Windows x64 installer
+    needs: version
+    runs-on: windows-2025
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 8.0.423
-
-      - name: Resolve the incremented release version
-        id: version
+          dotnet-version: 10.0.x
+      - name: Install native build dependencies
         shell: pwsh
         run: |
-          $runNumber = [long] '${{ github.run_number }}'
-          if ($runNumber -lt 1 -or $runNumber -gt 65534)
-          {
-              throw "Workflow run number '$runNumber' cannot be represented as a .NET version component."
-          }
-
-          $version = "1.0.$runNumber"
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Host "Release version: $version"
-
-      - name: Install installer build dependencies
-        shell: pwsh
-        run: |
-          choco install innosetup libreoffice-fresh --yes --no-progress
+          choco install innosetup libreoffice-fresh tesseract --yes --no-progress
           if ($LASTEXITCODE -notin @(0, 1641, 3010))
           {
               throw "Chocolatey dependency installation failed with exit code $LASTEXITCODE."
           }
-
-          $iscc = @(
-              'C:\Program Files\Inno Setup 7\ISCC.exe',
-              'C:\Program Files\Inno Setup 6\ISCC.exe',
-              'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
-              'C:\Program Files (x86)\Inno Setup\ISCC.exe'
-          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-
-          if ([string]::IsNullOrWhiteSpace($iscc))
-          {
-              throw 'Chocolatey completed without installing an Inno Setup compiler in a supported location.'
-          }
-
-          $soffice = @(
-              'C:\Program Files\LibreOffice\program\soffice.exe',
-              'C:\Program Files (x86)\LibreOffice\program\soffice.exe'
-          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-
-          if ([string]::IsNullOrWhiteSpace($soffice))
-          {
-              throw 'Chocolatey completed without installing LibreOffice in a supported location.'
-          }
-
-          Write-Host "Inno Setup: $iscc"
-          Write-Host "LibreOffice: $soffice"
-
-      - name: Build and verify the dependency-complete installer
+      - name: Build and smoke-test installer
         shell: pwsh
-        run: |
-          ./installer/Build-Installer.ps1 -Version '${{ steps.version.outputs.version }}'
-
-      - name: Create versioned and stable release assets
-        id: artifact
-        shell: pwsh
-        run: |
-          $version = '${{ steps.version.outputs.version }}'
-          $installer = [System.IO.Path]::GetFullPath("./artifacts/installer/DOC2MD-$version-win-x64-Setup.exe")
-          if (-not (Test-Path -LiteralPath $installer -PathType Leaf))
-          {
-              throw "The verified installer was not produced at '$installer'."
-          }
-
-          $checksum = "$installer.sha256"
-          $digest = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$digest  $([System.IO.Path]::GetFileName($installer))" |
-              Set-Content -LiteralPath $checksum -Encoding ascii
-
-          # Stable aliases let dependent installers use GitHub's releases/latest/download URL.
-          $stableInstaller = Join-Path ([System.IO.Path]::GetDirectoryName($installer)) 'DOC2MD-win-x64-Setup.exe'
-          $stableChecksum = "$stableInstaller.sha256"
-          Copy-Item -LiteralPath $installer -Destination $stableInstaller -Force
-          $stableDigest = (Get-FileHash -LiteralPath $stableInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($stableDigest -ne $digest)
-          {
-              throw 'The stable installer alias does not match the verified versioned installer.'
-          }
-
-          "$digest  $([System.IO.Path]::GetFileName($stableInstaller))" |
-              Set-Content -LiteralPath $stableChecksum -Encoding ascii
-
-          "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "checksum=$checksum" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "stable_installer=$stableInstaller" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "stable_checksum=$stableChecksum" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Create or update the GitHub release
+        run: ./installer/Build-Installer.ps1 -Version '${{ needs.version.outputs.version }}'
+      - name: Test packaged CLI with repository samples
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-          INSTALLER_PATH: ${{ steps.artifact.outputs.installer }}
-          CHECKSUM_PATH: ${{ steps.artifact.outputs.checksum }}
-          STABLE_INSTALLER_PATH: ${{ steps.artifact.outputs.stable_installer }}
-          STABLE_CHECKSUM_PATH: ${{ steps.artifact.outputs.stable_checksum }}
+          DOC2MD_RUN_SAMPLE_TESTS: '1'
+          DOC2MD_SAMPLE_TEST_CLI: ${{ github.workspace }}/artifacts/installer-build/payload/DOC2MD.Cli.exe
+          DOC2MD_SAMPLE_TEST_TESSDATA: ${{ github.workspace }}/artifacts/installer-build/payload/Resources/tessdata
+        run: dotnet test ./tests/DOC2MD.Integration.Tests/DOC2MD.Integration.Tests.csproj --configuration Release --nologo
+      - uses: actions/upload-artifact@v6
+        with:
+          name: installer-win-x64
+          path: artifacts/installer/DOC2MD-${{ needs.version.outputs.version }}-win-x64-Setup.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.runtime }} installer
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: osx-arm64
+            runner: macos-15
+          - runtime: osx-x64
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Install native build dependencies
+        shell: bash
         run: |
-          $PSNativeCommandUseErrorActionPreference = $false
-          $releaseJson = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft 2>$null
-          $releaseExitCode = $LASTEXITCODE
+          set -euo pipefail
+          brew install tesseract dylibbundler
+          brew install --cask libreoffice
+      - name: Build and smoke-test installer
+        shell: bash
+        run: ./installer/Build-MacInstaller.sh --version '${{ needs.version.outputs.version }}' --runtime '${{ matrix.runtime }}'
+      - name: Test packaged CLI with repository samples
+        shell: bash
+        env:
+          DOC2MD_RUN_SAMPLE_TESTS: '1'
+          DOC2MD_SAMPLE_TEST_CLI: ${{ github.workspace }}/artifacts/mac-installer-build/${{ matrix.runtime }}/DOC2MD.app/Contents/MacOS/DOC2MD.Cli
+          DOC2MD_SAMPLE_TEST_TESSDATA: ${{ github.workspace }}/artifacts/mac-installer-build/${{ matrix.runtime }}/DOC2MD.app/Contents/Resources/tessdata
+        run: dotnet test ./tests/DOC2MD.Integration.Tests/DOC2MD.Integration.Tests.csproj --configuration Release --nologo
+      - uses: actions/upload-artifact@v6
+        with:
+          name: installer-${{ matrix.runtime }}
+          path: |
+            artifacts/installer/DOC2MD-${{ needs.version.outputs.version }}-${{ matrix.runtime }}.pkg
+            artifacts/installer/DOC2MD-${{ needs.version.outputs.version }}-${{ matrix.runtime }}.pkg.sha256
+          if-no-files-found: error
 
-          if ($releaseExitCode -eq 0)
-          {
-              $tagCommit = (& gh api "repos/$env:GITHUB_REPOSITORY/commits/$env:RELEASE_TAG" --jq .sha).Trim()
-              if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $env:GITHUB_SHA)
-              {
-                  throw "Release tag $env:RELEASE_TAG does not point to workflow commit $env:GITHUB_SHA."
-              }
-
-              $release = $releaseJson | ConvertFrom-Json
-              Write-Host "Updating existing release $env:RELEASE_TAG (draft: $($release.isDraft))."
-          }
-          else
-          {
-              & gh release create $env:RELEASE_TAG `
-                  --repo $env:GITHUB_REPOSITORY `
-                  --target $env:GITHUB_SHA `
-                  --draft `
-                  --generate-notes `
-                  --title "DOC2MD $env:RELEASE_VERSION"
-              if ($LASTEXITCODE -ne 0)
-              {
-                  throw "Could not create draft release $env:RELEASE_TAG."
-              }
-          }
-
-          & gh release upload $env:RELEASE_TAG `
-              $env:INSTALLER_PATH `
-              $env:CHECKSUM_PATH `
-              $env:STABLE_INSTALLER_PATH `
-              $env:STABLE_CHECKSUM_PATH `
-              --repo $env:GITHUB_REPOSITORY `
-              --clobber
-          if ($LASTEXITCODE -ne 0)
-          {
-              throw "Could not upload release assets for $env:RELEASE_TAG."
-          }
-
-          & gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
-          if ($LASTEXITCODE -ne 0)
-          {
-              throw "Could not publish release $env:RELEASE_TAG."
-          }
-
-      - name: Verify the published release
-        shell: pwsh
+  release:
+    name: Publish GitHub release
+    needs:
+      - version
+      - windows
+      - macos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: installer-*
+          path: artifacts
+          merge-multiple: true
+      - name: Create checksums and stable aliases
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          version='${{ needs.version.outputs.version }}'
+          windows="DOC2MD-$version-win-x64-Setup.exe"
+          sha256sum "$windows" > "$windows.sha256"
+          cp "$windows" DOC2MD-win-x64-Setup.exe
+          sha256sum DOC2MD-win-x64-Setup.exe > DOC2MD-win-x64-Setup.exe.sha256
+          for runtime in osx-arm64 osx-x64; do
+            package="DOC2MD-$version-$runtime.pkg"
+            cp "$package" "DOC2MD-$runtime.pkg"
+            sha256sum "DOC2MD-$runtime.pkg" > "DOC2MD-$runtime.pkg.sha256"
+          done
+      - name: Create or update release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: |
-          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,assets | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0)
-          {
-              throw "Published release $env:RELEASE_TAG could not be read back."
-          }
-
-          if ($release.isDraft)
-          {
-              throw "Release $env:RELEASE_TAG is still a draft."
-          }
-
-          $expectedAssets = @(
-              "DOC2MD-$env:RELEASE_VERSION-win-x64-Setup.exe",
-              "DOC2MD-$env:RELEASE_VERSION-win-x64-Setup.exe.sha256",
-              'DOC2MD-win-x64-Setup.exe',
-              'DOC2MD-win-x64-Setup.exe.sha256'
-          )
-          $publishedAssets = @($release.assets | ForEach-Object { $_.name })
-          foreach ($expectedAsset in $expectedAssets)
-          {
-              if ($expectedAsset -notin $publishedAssets)
-              {
-                  throw "Release $env:RELEASE_TAG is missing '$expectedAsset'."
-              }
-          }
-
-          Write-Host "Verified release $env:RELEASE_TAG with all versioned and stable assets."
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "DOC2MD $RELEASE_VERSION" \
+              --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber

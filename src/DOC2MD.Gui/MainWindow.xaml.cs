@@ -2,9 +2,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Win32;
-using System.Windows;
-using System.Windows.Controls;
+using Avalonia.Controls;
+using Avalonia.Interactivity;
+using Avalonia.Platform.Storage;
 
 namespace DOC2MD.Gui;
 
@@ -62,48 +62,74 @@ public partial class MainWindow : Window
         TessdataTextBox.IsEnabled = local;
         BrowseTessdataButton.IsEnabled = local;
         AzureEndpointTextBox.IsEnabled = azure;
-        AzureKeyPasswordBox.IsEnabled = azure;
+        AzureKeyTextBox.IsEnabled = azure;
     }
 
-    private void BrowseInputClick(object sender, RoutedEventArgs e)
+    private async void BrowseInputClick(object? sender, RoutedEventArgs e)
     {
         if (FolderRadioButton.IsChecked == true)
         {
-            var dialog = new OpenFolderDialog();
-            if (dialog.ShowDialog(this) == true)
+            var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
             {
-                InputTextBox.Text = dialog.FolderName;
+                Title = "Select input folder",
+                AllowMultiple = false
+            });
+            var folderPath = folders.FirstOrDefault()?.TryGetLocalPath();
+            if (!string.IsNullOrWhiteSpace(folderPath))
+            {
+                InputTextBox.Text = folderPath;
             }
 
             return;
         }
 
-        var open = new OpenFileDialog
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Filter = "All supported documents|*.pdf;*.doc;*.docx;*.docm;*.xls;*.xlsx;*.xlsm;*.ppt;*.pptx;*.pptm;*.rtf;*.odt;*.ods;*.odp;*.txt;*.text;*.csv;*.html;*.htm;*.epub"
-        };
-        if (open.ShowDialog(this) == true)
+            Title = "Select document",
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType("Supported documents")
+                {
+                    Patterns = SupportedExtensions.Select(extension => $"*{extension}").ToArray()
+                }
+            ]
+        });
+        var filePath = files.FirstOrDefault()?.TryGetLocalPath();
+        if (!string.IsNullOrWhiteSpace(filePath))
         {
-            InputTextBox.Text = open.FileName;
-            OutputTextBox.Text = Path.ChangeExtension(open.FileName, ".md");
+            InputTextBox.Text = filePath;
+            OutputTextBox.Text = Path.ChangeExtension(filePath, ".md");
         }
     }
 
-    private void BrowseOutputClick(object sender, RoutedEventArgs e)
+    private async void BrowseOutputClick(object? sender, RoutedEventArgs e)
     {
-        var save = new SaveFileDialog { Filter = "Markdown|*.md|All files|*.*", DefaultExt = ".md" };
-        if (save.ShowDialog(this) == true)
+        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
         {
-            OutputTextBox.Text = save.FileName;
+            Title = "Select Markdown output",
+            SuggestedFileName = Path.GetFileName(OutputTextBox.Text),
+            DefaultExtension = "md",
+            FileTypeChoices = [new FilePickerFileType("Markdown") { Patterns = ["*.md"] }]
+        });
+        var filePath = file?.TryGetLocalPath();
+        if (!string.IsNullOrWhiteSpace(filePath))
+        {
+            OutputTextBox.Text = filePath;
         }
     }
 
-    private void BrowseTessdataClick(object sender, RoutedEventArgs e)
+    private async void BrowseTessdataClick(object? sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFolderDialog();
-        if (dialog.ShowDialog(this) == true)
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
-            TessdataTextBox.Text = dialog.FolderName;
+            Title = "Select Tesseract trained data folder",
+            AllowMultiple = false
+        });
+        var folderPath = folders.FirstOrDefault()?.TryGetLocalPath();
+        if (!string.IsNullOrWhiteSpace(folderPath))
+        {
+            TessdataTextBox.Text = folderPath;
         }
     }
 
@@ -136,12 +162,12 @@ public partial class MainWindow : Window
         catch (OperationCanceledException)
         {
             AppendLog("Operation cancelled.");
-            StatusLabel.Content = "Cancelled";
+            StatusTextBlock.Text = "Cancelled";
         }
         catch (Exception ex)
         {
             AppendLog("ERROR: " + ex.Message);
-            StatusLabel.Content = "Failed";
+            StatusTextBlock.Text = "Failed";
         }
         finally
         {
@@ -163,17 +189,17 @@ public partial class MainWindow : Window
             throw new InvalidOperationException("Output file is required.");
         }
 
-        var args = $"convert --input {Quote(InputTextBox.Text)} --output {Quote(OutputTextBox.Text)} --json";
+        var args = new List<string> { "convert", "--input", InputTextBox.Text, "--output", OutputTextBox.Text, "--json" };
         if (OverwriteCheckBox.IsChecked == true)
         {
-            args += " --overwrite";
+            args.Add("--overwrite");
         }
 
-        args += BuildPdfArguments();
-        StatusLabel.Content = "Converting 1 of 1";
+        AppendPdfArguments(args);
+        StatusTextBlock.Text = "Converting 1 of 1";
         var result = await ExecuteCliCommandAsync(args, cancellationToken);
         SetProgressValue(1);
-        StatusLabel.Content = result.exitCode == 0 ? "Completed" : "Failed";
+        StatusTextBlock.Text = result.exitCode == 0 ? "Completed" : "Failed";
     }
 
     private async Task ConvertFolderAsync(CancellationToken cancellationToken)
@@ -199,7 +225,7 @@ public partial class MainWindow : Window
         if (files.Length == 0)
         {
             AppendLog("No supported source documents were found.");
-            StatusLabel.Content = "No files";
+            StatusTextBlock.Text = "No files";
             ResetProgress(1);
             return;
         }
@@ -211,7 +237,7 @@ public partial class MainWindow : Window
             cancellationToken.ThrowIfCancellationRequested();
             var inputFile = files[i];
             var outputFile = Path.ChangeExtension(inputFile, ".md");
-            StatusLabel.Content = $"Converting {i + 1} of {files.Length}";
+            StatusTextBlock.Text = $"Converting {i + 1} of {files.Length}";
 
             if (File.Exists(outputFile) && OverwriteCheckBox.IsChecked != true)
             {
@@ -220,13 +246,13 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            var args = $"convert --input {Quote(inputFile)} --output {Quote(outputFile)} --json";
+            var args = new List<string> { "convert", "--input", inputFile, "--output", outputFile, "--json" };
             if (OverwriteCheckBox.IsChecked == true)
             {
-                args += " --overwrite";
+                args.Add("--overwrite");
             }
 
-            args += BuildPdfArguments();
+            AppendPdfArguments(args);
             var result = await ExecuteCliCommandAsync(args, cancellationToken);
             if (result.exitCode != 0)
             {
@@ -236,13 +262,15 @@ public partial class MainWindow : Window
             SetProgressValue(i + 1);
         }
 
-        StatusLabel.Content = failures == 0 ? $"Completed {files.Length} files" : $"Completed with {failures} failure(s)";
+        StatusTextBlock.Text = failures == 0 ? $"Completed {files.Length} files" : $"Completed with {failures} failure(s)";
     }
 
-    private async Task<(int exitCode, string stdout, string stderr)> ExecuteCliCommandAsync(string arguments, CancellationToken cancellationToken)
+    private async Task<(int exitCode, string stdout, string stderr)> ExecuteCliCommandAsync(
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
     {
-        var cliPath = ResolveCliPath();
-        AppendLog("> " + cliPath + " " + RedactSecretArguments(arguments));
+        var cliPath = CliExecutableLocator.Resolve();
+        AppendLog("> " + FormatCommandForLog(cliPath, arguments));
         var result = await RunCliAsync(cliPath, arguments, cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(result.stdout))
@@ -270,13 +298,15 @@ public partial class MainWindow : Window
             .OrderBy(file => file, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-    private async Task<(int exitCode, string stdout, string stderr)> RunCliAsync(string cliPath, string arguments, CancellationToken cancellationToken)
+    private async Task<(int exitCode, string stdout, string stderr)> RunCliAsync(
+        string cliPath,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
         {
             FileName = cliPath,
-            Arguments = arguments,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -285,9 +315,14 @@ public partial class MainWindow : Window
             StandardErrorEncoding = Encoding.UTF8
         };
 
-        if (SelectedPdfProcessing() == "azure" && !string.IsNullOrWhiteSpace(AzureKeyPasswordBox.Password))
+        foreach (var argument in arguments)
         {
-            process.StartInfo.Environment["DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY"] = AzureKeyPasswordBox.Password;
+            process.StartInfo.ArgumentList.Add(argument);
+        }
+
+        if (SelectedPdfProcessing() == "azure" && !string.IsNullOrWhiteSpace(AzureKeyTextBox.Text))
+        {
+            process.StartInfo.Environment["DOC2MD_AZURE_DOCUMENT_INTELLIGENCE_KEY"] = AzureKeyTextBox.Text;
         }
 
         process.Start();
@@ -334,7 +369,7 @@ public partial class MainWindow : Window
         }
 
         AppendLog("Cancellation requested.");
-        StatusLabel.Content = "Cancelling";
+        StatusTextBlock.Text = "Cancelling";
         _operationCts.Cancel();
         KillCurrentProcess();
     }
@@ -377,31 +412,8 @@ public partial class MainWindow : Window
 
     private void AppendLog(string text)
     {
-        LogTextBox.AppendText(text + Environment.NewLine);
-        LogTextBox.ScrollToEnd();
-    }
-
-    private static string ResolveCliPath()
-    {
-        var configured = Environment.GetEnvironmentVariable("DOC2MD_CLI_PATH");
-        if (!string.IsNullOrWhiteSpace(configured))
-        {
-            return configured;
-        }
-
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
-        while (current is not null)
-        {
-            var candidate = Path.Combine(current.FullName, "src", "DOC2MD.Cli", "bin", "Debug", "net8.0", "DOC2MD.Cli.exe");
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            current = current.Parent;
-        }
-
-        return "DOC2MD.Cli.exe";
+        LogTextBox.Text = (LogTextBox.Text ?? string.Empty) + text + Environment.NewLine;
+        LogTextBox.CaretIndex = LogTextBox.Text.Length;
     }
 
     private void ConfigurePdfDefaults()
@@ -436,79 +448,40 @@ public partial class MainWindow : Window
         }
     }
 
-    private string BuildPdfArguments()
+    private void AppendPdfArguments(List<string> args)
     {
         var mode = SelectedPdfProcessing();
-        var args = $" --pdf-processing {Quote(mode)}";
+        AppendArgument(args, "--pdf-processing", mode);
         if (mode == "local")
         {
-            args += OptionalArgument("--ocr-languages", OcrLanguagesTextBox.Text);
-            args += OptionalArgument("--tessdata", TessdataTextBox.Text);
+            AppendArgument(args, "--ocr-languages", OcrLanguagesTextBox.Text);
+            AppendArgument(args, "--tessdata", TessdataTextBox.Text);
         }
         else if (mode == "azure")
         {
-            args += OptionalArgument("--azure-document-intelligence-endpoint", AzureEndpointTextBox.Text);
+            AppendArgument(args, "--azure-document-intelligence-endpoint", AzureEndpointTextBox.Text);
         }
-
-        return args;
     }
 
     private string SelectedPdfProcessing() =>
         (PdfProcessingComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "local";
 
-    private static string OptionalArgument(string name, string? value) =>
-        string.IsNullOrWhiteSpace(value) ? "" : $" {name} {Quote(value)}";
-
-    private static string RedactSecretArguments(string arguments)
+    private static void AppendArgument(List<string> arguments, string name, string? value)
     {
-        foreach (var name in new[] { "--azure-document-intelligence-key", "--azure-key" })
+        if (!string.IsNullOrWhiteSpace(value))
         {
-            var index = arguments.IndexOf(name, StringComparison.OrdinalIgnoreCase);
-            if (index < 0)
-            {
-                continue;
-            }
-
-            var valueStart = index + name.Length;
-            while (valueStart < arguments.Length && char.IsWhiteSpace(arguments[valueStart]))
-            {
-                valueStart++;
-            }
-
-            if (valueStart >= arguments.Length)
-            {
-                continue;
-            }
-
-            var valueEnd = valueStart;
-            if (arguments[valueStart] == '"')
-            {
-                valueEnd++;
-                while (valueEnd < arguments.Length && arguments[valueEnd] != '"')
-                {
-                    valueEnd++;
-                }
-
-                if (valueEnd < arguments.Length)
-                {
-                    valueEnd++;
-                }
-            }
-            else
-            {
-                while (valueEnd < arguments.Length && !char.IsWhiteSpace(arguments[valueEnd]))
-                {
-                    valueEnd++;
-                }
-            }
-
-            arguments = arguments[..valueStart] + "\"***\"" + arguments[valueEnd..];
+            arguments.Add(name);
+            arguments.Add(value);
         }
-
-        return arguments;
     }
 
-    private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
+    private static string FormatCommandForLog(string executable, IReadOnlyList<string> arguments) =>
+        string.Join(' ', new[] { executable }.Concat(arguments).Select(QuoteForLog));
+
+    private static string QuoteForLog(string value) =>
+        value.Any(char.IsWhiteSpace) || value.Contains('"')
+            ? "\"" + value.Replace("\"", "\\\"") + "\""
+            : value;
 
     private sealed class StoredDoc2MdSettings
     {

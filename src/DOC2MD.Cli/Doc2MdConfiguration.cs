@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -50,7 +48,7 @@ internal static class Doc2MdConfiguration
         WriteIndented = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
-    private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("DOC2MD.AzureDocumentIntelligenceKey.v1");
+    private static readonly ISecretStore SecretStore = SecretStoreFactory.Create();
 
     public static string SettingsPath =>
         Path.Combine(
@@ -72,15 +70,15 @@ internal static class Doc2MdConfiguration
         var settings = JsonSerializer.Deserialize<Doc2MdSettings>(File.ReadAllText(SettingsPath), JsonOptions)
             ?? new Doc2MdSettings();
         // Only the protected representation is persisted; plaintext exists solely on the returned in-memory object.
-        settings.AzureDocumentIntelligenceKey = Unprotect(settings.ProtectedAzureDocumentIntelligenceKey);
+        settings.AzureDocumentIntelligenceKey = SecretStore.Load(settings.ProtectedAzureDocumentIntelligenceKey);
         return settings;
     }
 
     /// <summary>
-    /// Persists Azure Document Intelligence settings with the API key protected for the current Windows user.
+    /// Persists Azure Document Intelligence settings with the API key protected by the current operating system.
     /// </summary>
     /// <param name="endpoint">The Azure Document Intelligence endpoint.</param>
-    /// <param name="key">The API key to protect with Windows DPAPI.</param>
+    /// <param name="key">The API key to protect with the platform credential store.</param>
     /// <param name="locale">The optional document locale.</param>
     /// <param name="tier">The Azure service tier identifier.</param>
     /// <param name="useAzureByDefault">Whether future conversions should select Azure processing by default.</param>
@@ -97,49 +95,12 @@ internal static class Doc2MdConfiguration
         settings.AzureDocumentIntelligenceLocale = string.IsNullOrWhiteSpace(locale) ? null : locale;
         settings.AzureDocumentIntelligenceTier = tier;
         // Clear the transient plaintext property before serialization to prevent accidental credential disclosure.
-        settings.ProtectedAzureDocumentIntelligenceKey = Protect(key);
+        settings.ProtectedAzureDocumentIntelligenceKey = SecretStore.Save(key);
         settings.AzureDocumentIntelligenceKey = null;
 
         Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, JsonOptions), Encoding.UTF8);
+        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, JsonOptions), System.Text.Encoding.UTF8);
     }
 
-    /// <summary>
-    /// Protects a secret with the Windows current-user DPAPI scope.
-    /// </summary>
-    /// <param name="value">The plaintext value.</param>
-    /// <returns>The Base64-encoded protected value.</returns>
-    /// <exception cref="PlatformNotSupportedException">Thrown when invoked outside Windows.</exception>
-    private static string Protect(string value)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("DOC2MD secure local key storage uses Windows DPAPI.");
-        }
-
-        // CurrentUser scope deliberately makes copied settings unusable by other accounts on the same machine.
-        var protectedBytes = ProtectedData.Protect(
-            Encoding.UTF8.GetBytes(value),
-            Entropy,
-            DataProtectionScope.CurrentUser);
-        return Convert.ToBase64String(protectedBytes);
-    }
-
-    /// <summary>
-    /// Decrypts a Base64-encoded DPAPI value for the current Windows user.
-    /// </summary>
-    /// <param name="protectedValue">The protected value, if one was saved.</param>
-    /// <returns>The plaintext value, or <see langword="null"/> when no usable protected value is available.</returns>
-    private static string? Unprotect(string? protectedValue)
-    {
-        // Non-Windows callers may inspect non-secret settings, but Windows-bound DPAPI data cannot be recovered there.
-        if (string.IsNullOrWhiteSpace(protectedValue) || !OperatingSystem.IsWindows())
-        {
-            return null;
-        }
-
-        var protectedBytes = Convert.FromBase64String(protectedValue);
-        var bytes = ProtectedData.Unprotect(protectedBytes, Entropy, DataProtectionScope.CurrentUser);
-        return Encoding.UTF8.GetString(bytes);
-    }
+    public static string SecretStorageDescription => SecretStore.Description;
 }

@@ -25,19 +25,18 @@ app.MapPost("/convert", async (ConvertDocumentRequest request) =>
     }
 
     // The API validates transport-level requirements; the CLI remains authoritative for formats and processing options.
-    var args = $"convert --input {Quote(request.InputPath)} --output {Quote(request.OutputPath)} --json";
+    var args = new List<string> { "convert", "--input", request.InputPath, "--output", request.OutputPath, "--json" };
     if (request.Overwrite)
     {
-        args += " --overwrite";
+        args.Add("--overwrite");
     }
 
-    args += BuildPdfOptions(request);
+    AppendPdfOptions(args, request);
 
     var result = await CliRunner.RunAsync(args, request.AzureDocumentIntelligenceKey);
     return CliRunner.ToHttpResult(result);
 })
-.WithName("ConvertDocument")
-.WithOpenApi();
+.WithName("ConvertDocument");
 
 app.MapPost("/convert-folder", async (ConvertFolderRequest request) =>
 {
@@ -47,40 +46,35 @@ app.MapPost("/convert-folder", async (ConvertFolderRequest request) =>
     }
 
     // Folder output stays implicit because the CLI writes Markdown beside each selected source document.
-    var args = $"convert-folder --input {Quote(request.InputFolder)} --json";
+    var args = new List<string> { "convert-folder", "--input", request.InputFolder, "--json" };
     if (request.Recursive)
     {
-        args += " --recursive";
+        args.Add("--recursive");
     }
 
     if (request.Overwrite)
     {
-        args += " --overwrite";
+        args.Add("--overwrite");
     }
 
     if (request.ContinueOnError)
     {
-        args += " --continue-on-error";
+        args.Add("--continue-on-error");
     }
 
-    args += BuildPdfOptions(request);
+    AppendPdfOptions(args, request);
 
     var result = await CliRunner.RunAsync(args, request.AzureDocumentIntelligenceKey);
     return CliRunner.ToHttpResult(result);
 })
-.WithName("ConvertFolder")
-.WithOpenApi();
+.WithName("ConvertFolder");
 
 app.Run();
 
-// Quotes one CLI argument; top-level local functions cannot carry C# XML documentation comments.
-static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
-
-// Builds the shared PDF argument fragment while leaving cross-stack validation to the CLI.
-static string BuildPdfOptions(IPdfProcessingRequest request)
+// Appends shared PDF options while leaving cross-stack validation to the CLI.
+static void AppendPdfOptions(List<string> args, IPdfProcessingRequest request)
 {
     // Optional values are omitted instead of serialized as empty strings so CLI defaults and persisted settings still apply.
-    var args = new StringBuilder();
     Append(args, "--pdf-processing", request.PdfProcessing);
     Append(args, "--ocr-languages", request.OcrLanguages);
     Append(args, "--tessdata", request.TessdataPath);
@@ -92,16 +86,15 @@ static string BuildPdfOptions(IPdfProcessingRequest request)
     Append(args, "--azure-document-intelligence-endpoint", request.AzureDocumentIntelligenceEndpoint);
     Append(args, "--azure-document-intelligence-locale", request.AzureDocumentIntelligenceLocale);
     Append(args, "--azure-document-intelligence-tier", request.AzureDocumentIntelligenceTier);
-    return args.ToString();
 }
 
-// Appends a quoted name/value option only when the request supplied a meaningful value.
-static void Append(StringBuilder args, string name, string? value)
+// Appends a name/value option only when the request supplied a meaningful value.
+static void Append(List<string> args, string name, string? value)
 {
-    // A leading space makes fragments composable with the already-built command verb and required arguments.
     if (!string.IsNullOrWhiteSpace(value))
     {
-        args.Append(' ').Append(name).Append(' ').Append(Quote(value));
+        args.Add(name);
+        args.Add(value);
     }
 }
 
@@ -175,13 +168,12 @@ internal static class CliRunner
     /// <param name="arguments">The prepared CLI arguments.</param>
     /// <param name="azureDocumentIntelligenceKey">An optional request-scoped Azure key.</param>
     /// <returns>The CLI exit code and output streams.</returns>
-    public static async Task<CliResult> RunAsync(string arguments, string? azureDocumentIntelligenceKey)
+    public static async Task<CliResult> RunAsync(IReadOnlyList<string> arguments, string? azureDocumentIntelligenceKey)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
         {
-            FileName = ResolveCliPath(),
-            Arguments = arguments,
+            FileName = CliExecutableLocator.Resolve(),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -189,6 +181,11 @@ internal static class CliRunner
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8
         };
+
+        foreach (var argument in arguments)
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
 
         if (!string.IsNullOrWhiteSpace(azureDocumentIntelligenceKey))
         {
@@ -225,33 +222,6 @@ internal static class CliRunner
         return result.ExitCode == 0 ? Results.Ok(body) : Results.BadRequest(body);
     }
 
-    /// <summary>
-    /// Resolves the CLI from explicit deployment configuration, a development checkout, or the process search path.
-    /// </summary>
-    /// <returns>The CLI executable path or fallback command name.</returns>
-    private static string ResolveCliPath()
-    {
-        // Explicit configuration supports IIS deployments where the API and CLI publish directories are separated.
-        var configured = Environment.GetEnvironmentVariable("DOC2MD_CLI_PATH");
-        if (!string.IsNullOrWhiteSpace(configured))
-        {
-            return configured;
-        }
-
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
-        while (current is not null)
-        {
-            var candidate = Path.Combine(current.FullName, "src", "DOC2MD.Cli", "bin", "Debug", "net8.0", "DOC2MD.Cli.exe");
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            current = current.Parent;
-        }
-
-        return "DOC2MD.Cli.exe";
-    }
 }
 
 internal sealed record CliResult(int ExitCode, string Stdout, string Stderr);
